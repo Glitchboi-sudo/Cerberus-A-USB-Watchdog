@@ -20,17 +20,6 @@ Enfocado a expertos en ciberseguridad (SOC, blue teamers y red teamers). Cerberu
 
 ---
 
-## Tabla de Contenidos
-
-- [Instalación](#-instalación)
-- [Uso](#-uso)
-- [Hardware](#-hardware)
-- [TODO](#-todo)
-- [Contribuir](#-contribuir)
-- [Créditos](#-créditos)
-
----
-
 ## Instalación
 
 ### Prerequisitos
@@ -116,6 +105,6 @@ No necesitas ser experto para ayudar: si crees que algo puede explicarse mejor, 
 
 ## Créditos
 
-Proyecto basado en [USBvalve](https://github.com/cecio/USBvalve) hecho por *[Cecio](https://github.com/cecio)* 
-Modificado / Creado por:
-- [Erik Alcantara](https://www.linkedin.com/in/erik-alc%C3%A1ntara-covarrubias-29a97628a/)
+- Proyecto basado en [USBvalve](https://github.com/cecio/USBvalve) hecho por *[Cecio](https://github.com/cecio)* 
+- Modificado / Creado por:
+  - [Erik Alcantara](https://www.linkedin.com/in/erik-alc%C3%A1ntara-covarrubias-29a97628a/)
