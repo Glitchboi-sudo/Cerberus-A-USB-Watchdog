@@ -1,8 +1,7 @@
 # Cerberus
 
-<p align="center">
-  <img src="docs/logo.png" alt="Logo de Glitchboi" width="200">
-</p>
+![Alpha V3 del proyecto](1.jpeg)
+
 <p align="center">
   <strong>Desarrollado por Glitchboi</strong><br>
   Seguridad desde México para todos
@@ -44,8 +43,8 @@ Enfocado a expertos en ciberseguridad (SOC, blue teamers y red teamers). Cerberu
 - Pantalla I2C OLED de 128x64 o 128x32 (SSD1306)
 
 ### Pasos
-
-##### Usando la version precompilada
+---
+#### Usando la version precompilada
 
 Dentro del github ve a releases y busca el archivo .uf2 mas reciente, descargalo
 
@@ -56,13 +55,15 @@ Para flashear la imagen debes:
 - Copia el archivo creado `.uf2` en el folder, dependiendo de la pantalla OLED.
 - Espera unos segundos hasta que desaparezca el dispositivo
 
-##### Compila tu version
+#### Compila tu version
+
+Obten el repo de forma local
 ``` bash
 git clone https://github.com/Glitchboi-sudo/Cerberus-A-USB-Watchdog.git
 ```
 
 Con Arduino IDE
-- Abre el proyecto `.ino` en /software
+- Abre el proyecto `.ino` en software/
 - Conecta  la Raspberry Pi Pico con un cable USB
 - Selecciona la Pico en Arduino
 - Click en `Upload`
