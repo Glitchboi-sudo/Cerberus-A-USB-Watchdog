@@ -24,10 +24,10 @@ Enfocado a expertos en ciberseguridad (SOC, blue teamers y red teamers). Cerberu
 
 ### Prerequisitos
 - Instalar ArduinoIDE
-- `Adafruit TinyUSB Library` version `3.6.0`
-- `Pico-PIO-USB` version `0.7.2`
+- `Adafruit TinyUSB Library` version `>=3.6.0`
+- `Pico-PIO-USB` version `>=0.7.2`
 - Boards `Raspberry Pi RP2040 (4.5.4)` con CPU Speed at `133MHz` y Tools=>USB Stack en `Adafruit TinyUSB`
-- `Adafruit_SSD1306` OLED library version `2.5.14`
+- `Adafruit_SSD1306` OLED library version `>=2.5.14`
 - Raspberry Pi Pico 1 o 2 (u otra devboars basada en RP2040)
 - Pantalla I2C OLED de 128x64 o 128x32 (SSD1306)
 
@@ -52,9 +52,10 @@ git clone https://github.com/Glitchboi-sudo/Cerberus-A-USB-Watchdog.git
 ```
 
 Con Arduino IDE
-- Abre `Software/Cerberus/Cerberus.ino` (la carpeta ya coincide con el nombre del sketch, el IDE no pedira moverlo).
+- Abre `Software/Cerberus/Cerberus.ino`.
 - Conecta  la Raspberry Pi Pico con un cable USB
 - Selecciona la Pico en Arduino
+- Tools -> USBStack -> Adafruit TinyUSB
 - Click en `Upload`
 
 ---

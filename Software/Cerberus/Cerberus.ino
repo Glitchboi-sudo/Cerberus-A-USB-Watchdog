@@ -89,11 +89,14 @@ Adafruit_USBD_MSC usb_msc;
 // Botón de reset manual (GP3 a GND)
 #define BTN_RST 3
 
+// Botón de reset manual (GP6 a GND)
+#define BTN_OK 6
+
 //
 // USBKiller Globals
 //
 #define KILLER_PIN 8
-#define NEOPIXEL_PIN 28
+#define NEOPIXEL_PIN 29
 #define NEOPIXEL_COUNT 1
 
 //
@@ -554,15 +557,46 @@ static void print_device_descriptor(tuh_xfer_t *xfer)
   SerialTinyUSB.printf("  idVendor            0x%04x\r\n" , desc->idVendor);
   SerialTinyUSB.printf("  idProduct           0x%04x\r\n" , desc->idProduct);
   SerialTinyUSB.printf("  bcdDevice           %04x\r\n"   , desc->bcdDevice);
-
   // -------- Manufacturer String --------
-  SerialTinyUSB.printf("  iManufacturer       %u\r\n", desc->iManufacturer);
+  SerialTinyUSB.printf("  iManufacturer       %u\r", desc->iManufacturer);
+  if (desc->iManufacturer &&
+      XFER_RESULT_SUCCESS ==
+        tuh_descriptor_get_manufacturer_string_sync(daddr,
+                                                    LANGUAGE_ID,
+                                                    dev->manufacturer,
+                                                    sizeof(dev->manufacturer))) {
+
+    utf16_to_utf8(dev->manufacturer, sizeof(dev->manufacturer));
+    SerialTinyUSB.printf(" --- %s\r", (char *) dev->manufacturer);
+  }
+  SerialTinyUSB.printf("\n");
 
   // -------- Product String --------
-  SerialTinyUSB.printf("  iProduct            %u\r\n", desc->iProduct);
+  SerialTinyUSB.printf("  iProduct            %u\r", desc->iProduct);
+  if (desc->iProduct &&
+      XFER_RESULT_SUCCESS ==
+        tuh_descriptor_get_product_string_sync(daddr,
+                                               LANGUAGE_ID,
+                                               dev->product,
+                                               sizeof(dev->product))) {
 
+    utf16_to_utf8(dev->product, sizeof(dev->product));
+    SerialTinyUSB.printf(" --- %s\r", (char *) dev->product);
+  }
+  SerialTinyUSB.printf("\n");
   // -------- Serial Number String --------
-  SerialTinyUSB.printf("  iSerialNumber       %u\r\n", desc->iSerialNumber);
+  SerialTinyUSB.printf("  iSerialNumber       %u\r", desc->iSerialNumber);
+  if (desc->iSerialNumber &&
+      XFER_RESULT_SUCCESS ==
+        tuh_descriptor_get_serial_string_sync(daddr,
+                                              LANGUAGE_ID,
+                                              dev->serial,
+                                              sizeof(dev->serial))) {
+
+    utf16_to_utf8(dev->serial, sizeof(dev->serial));
+    SerialTinyUSB.printf(" --- %s\r", (char *) dev->serial);
+  }
+  SerialTinyUSB.printf("\n");
   SerialTinyUSB.printf("  bNumConfigurations  %u\r\n", desc->bNumConfigurations);
   SerialTinyUSB.printf("======================================\r\n");
 }
