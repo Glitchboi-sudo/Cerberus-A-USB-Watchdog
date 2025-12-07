@@ -41,7 +41,7 @@
 //
 
 // Keep 11 chars
-#define DISK_LABEL 'M', 'y', 'D', 'r', 'i', 'v', 'e', ' ', ' ', ' ', ' '
+#define DISK_LABEL 'C', 'e', 'r', 'b', 'e', 'r', 'u', 's', ' ', ' ', ' '
 
 // Do not change this here, it is just for reference
 #define README_CONTENTS \

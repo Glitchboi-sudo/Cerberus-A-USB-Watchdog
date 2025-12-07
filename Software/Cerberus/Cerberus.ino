@@ -23,15 +23,17 @@
 #include "Adafruit_TinyUSB.h"
 #include <XxHash_arduino.h>
 #include <pico/stdlib.h>
-#include <hardware/pio.h>     // PIO definitions (fixes missing pio.h)
 #include <hardware/clocks.h>  // set_sys_clock_khz
-#include <hardware/sync.h>    // spin_lock_*
-
 #include <SPI.h>
 #include <Wire.h>
+#include <pico/util/queue.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+
+extern "C" {
+  #include "tusb.h"
+}
 
 //
 // BADUSB detector section
@@ -50,6 +52,18 @@
 // USB Host object
 Adafruit_USBH_Host USBHost;
 
+// USB_Desc Structure
+typedef struct {
+  tusb_desc_device_t desc_device;
+  uint16_t manufacturer[32];
+  uint16_t product[48];
+  uint16_t serial[16];
+  bool mounted;
+} dev_info_t;
+
+// CFG_TUH_DEVICE_MAX is defined by tusb_config header
+dev_info_t dev_info[CFG_TUH_DEVICE_MAX] = { 0 };
+
 // END of BADUSB detector section
 
 #define I2C_ADDRESS 0x3C  // 0X3C+SA0 - 0x3C or 0x3D
@@ -58,6 +72,10 @@ Adafruit_USBH_Host USBHost;
 #define OLED_HEIGHT 64    // 64 or 32 depending on the OLED
 
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, RST_PIN);
+
+typedef struct {
+  char text[64];
+} DisplayMsg;
 
 // Define the dimension of RAM DISK. We have a "real" one (for which
 // a real array is created) and a "fake" one, presented to the OS
@@ -93,8 +111,8 @@ boolean hid_reported = false;
 boolean usbkiller = false;
 uint hid_event_num = 0;
 
-static spin_lock_t *lock;
 Adafruit_NeoPixel statusPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+queue_t display_queue;  // Thread-safe queue for cross-core OLED messages
 
 //
 // Anti-Detection settings.
@@ -136,8 +154,8 @@ void detectUSBKiller() {
 
 // Core 0 Setup: will be used for the USB mass device functions
 void setup() {
-  // Initialize the spinlock
-  lock = spin_lock_instance(0);
+  // Init queue used to pass text from host callbacks (core1) to OLED (core0)
+  queue_init(&display_queue, sizeof(DisplayMsg), 16);
 
   // Change all the USB Pico settings
   TinyUSBDevice.setID(USB_VENDORID, USB_PRODUCTID);
@@ -218,6 +236,11 @@ void setup1() {
 
 // Main Core0 loop: managing display
 void loop() {
+  // Drain any text queued from host callbacks (running on core1)
+  DisplayMsg msg;
+  while (queue_try_remove(&display_queue, &msg)) {
+    printout(msg.text);
+  }
 
   static bool rst_prev = true;
   bool rst_now = digitalRead(BTN_RST);
@@ -402,6 +425,15 @@ void checkAndScroll() {
   }
 }
 
+// Queue-safe enqueue to avoid cross-core I2C usage
+void enqueue_display(const char *str) {
+  DisplayMsg msg;
+  strncpy(msg.text, str, sizeof(msg.text) - 1);
+  msg.text[sizeof(msg.text) - 1] = '\0';
+  // If queue is full we drop the message silently to avoid blocking
+  queue_try_add(&display_queue, &msg);
+}
+
 void printout(const char *str)
 {
   checkAndScroll();
@@ -465,6 +497,128 @@ void swreset() {
 }
 
 //
+// Device info gathering 
+//
+static void print_device_descriptor(tuh_xfer_t *xfer);
+void utf16_to_utf8(uint16_t *temp_buf, size_t buf_len);
+
+// Invocado cuando cualquier dispositivo se monta (configurado)
+void tuh_mount_cb(uint8_t daddr)
+{
+  SerialTinyUSB.printf("Device attached, address = %d\r\n", daddr);
+
+  dev_info_t *dev = &dev_info[daddr - 1];
+  dev->mounted = true;
+
+  // Pide el Device Descriptor, cuando llegue se llama a print_device_descriptor()
+  tuh_descriptor_get_device(daddr,
+                            &dev->desc_device,
+                            sizeof(tusb_desc_device_t),
+                            print_device_descriptor,
+                            0);
+}
+
+/// Invocado cuando el dispositivo se desmonta (reset/unplug)
+void tuh_umount_cb(uint8_t daddr)
+{
+  SerialTinyUSB.printf("Device removed, address = %d\r\n", daddr);
+
+  dev_info_t *dev = &dev_info[daddr - 1];
+  dev->mounted = false;
+}
+
+static void print_device_descriptor(tuh_xfer_t *xfer)
+{
+  if (XFER_RESULT_SUCCESS != xfer->result) {
+    SerialTinyUSB.printf("Failed to get device descriptor\r\n");
+    return;
+  }
+
+  uint8_t const daddr = xfer->daddr;
+  dev_info_t *dev = &dev_info[daddr - 1];
+  tusb_desc_device_t *desc = &dev->desc_device;
+
+  // Show a short summary on the OLED/serial right away
+  char summary[48];
+  SerialTinyUSB.printf("\r\nDevice %u: ID %04x:%04x\r\n",
+                       daddr, desc->idVendor, desc->idProduct);
+
+  SerialTinyUSB.printf("Device Descriptor:\r\n");
+  SerialTinyUSB.printf("  bLength             %u\r\n"     , desc->bLength);
+  SerialTinyUSB.printf("  bDescriptorType     %u\r\n"     , desc->bDescriptorType);
+  SerialTinyUSB.printf("  bcdUSB              %04x\r\n"   , desc->bcdUSB);
+  SerialTinyUSB.printf("  bDeviceClass        %u\r\n"     , desc->bDeviceClass);
+  SerialTinyUSB.printf("  bDeviceSubClass     %u\r\n"     , desc->bDeviceSubClass);
+  SerialTinyUSB.printf("  bDeviceProtocol     %u\r\n"     , desc->bDeviceProtocol);
+  SerialTinyUSB.printf("  bMaxPacketSize0     %u\r\n"     , desc->bMaxPacketSize0);
+  SerialTinyUSB.printf("  idVendor            0x%04x\r\n" , desc->idVendor);
+  SerialTinyUSB.printf("  idProduct           0x%04x\r\n" , desc->idProduct);
+  SerialTinyUSB.printf("  bcdDevice           %04x\r\n"   , desc->bcdDevice);
+
+  // -------- Manufacturer String --------
+  SerialTinyUSB.printf("  iManufacturer       %u\r\n", desc->iManufacturer);
+
+  // -------- Product String --------
+  SerialTinyUSB.printf("  iProduct            %u\r\n", desc->iProduct);
+
+  // -------- Serial Number String --------
+  SerialTinyUSB.printf("  iSerialNumber       %u\r\n", desc->iSerialNumber);
+  SerialTinyUSB.printf("  bNumConfigurations  %u\r\n", desc->bNumConfigurations);
+  SerialTinyUSB.printf("======================================\r\n");
+}
+
+//--------------------------------------------------------------------+
+// String Descriptor Helper
+//--------------------------------------------------------------------+
+
+static void _convert_utf16le_to_utf8(const uint16_t *utf16, size_t utf16_len, uint8_t *utf8, size_t utf8_len) {
+  // TODO: Check for runover.
+  (void) utf8_len;
+  // Get the UTF-16 length out of the data itself.
+
+  for (size_t i = 0; i < utf16_len; i++) {
+    uint16_t chr = utf16[i];
+    if (chr < 0x80) {
+      *utf8++ = chr & 0xff;
+    } else if (chr < 0x800) {
+      *utf8++ = (uint8_t) (0xC0 | (chr >> 6 & 0x1F));
+      *utf8++ = (uint8_t) (0x80 | (chr >> 0 & 0x3F));
+    } else {
+      // TODO: Verify surrogate.
+      *utf8++ = (uint8_t) (0xE0 | (chr >> 12 & 0x0F));
+      *utf8++ = (uint8_t) (0x80 | (chr >> 6 & 0x3F));
+      *utf8++ = (uint8_t) (0x80 | (chr >> 0 & 0x3F));
+    }
+    // TODO: Handle UTF-16 code points that take two entries.
+  }
+}
+
+// Count how many bytes a utf-16-le encoded string will take in utf-8.
+static int _count_utf8_bytes(const uint16_t *buf, size_t len) {
+  size_t total_bytes = 0;
+  for (size_t i = 0; i < len; i++) {
+    uint16_t chr = buf[i];
+    if (chr < 0x80) {
+      total_bytes += 1;
+    } else if (chr < 0x800) {
+      total_bytes += 2;
+    } else {
+      total_bytes += 3;
+    }
+    // TODO: Handle UTF-16 code points that take two entries.
+  }
+  return total_bytes;
+}
+
+void utf16_to_utf8(uint16_t *temp_buf, size_t buf_len) {
+  size_t utf16_len = ((temp_buf[0] & 0xff) - 2) / sizeof(uint16_t);
+  size_t utf8_len = _count_utf8_bytes(temp_buf + 1, utf16_len);
+
+  _convert_utf16le_to_utf8(temp_buf + 1, utf16_len, (uint8_t *) temp_buf, buf_len);
+  ((uint8_t *) temp_buf)[utf8_len] = '\0';
+}
+
+//
 // BADUSB detector section
 //
 
@@ -472,8 +626,6 @@ static uint8_t const keycode2ascii[128][2] = { HID_KEYCODE_TO_ASCII };
 
 // Invoked when device with hid interface is mounted
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-
-  uint32_t lock_num = spin_lock_blocking(lock);
 
   uint16_t vid, pid;
   const char* protocol_str[] = { "None", "Keyboard", "Mouse" };
@@ -493,26 +645,20 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
   if (!tuh_hid_receive_report(dev_addr, instance)) {
     SerialTinyUSB.printf("Error: cannot request to receive report\r\n");
   }
-
-  spin_unlock(lock, lock_num);
 }
 
 // Invoked when device with hid interface is un-mounted
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-  uint32_t lock_num = spin_lock_blocking(lock);
   SerialTinyUSB.printf("HID device address = %d, instance = %d unmounted\r\n", dev_addr, instance);
 
   // Reset HID sent flag
   hid_sent = false;
   hid_reported = false;
   hid_event_num = 0;
-  spin_unlock(lock, lock_num);
 }
 
 // Invoked when received report from device
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len) {
-
-  uint32_t lock_num = spin_lock_blocking(lock);
 
   static bool kbd_printed = false;
   static bool mouse_printed = false;
@@ -554,8 +700,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
   if (!tuh_hid_receive_report(dev_addr, instance)) {
     SerialTinyUSB.println("Error: cannot request to receive report");
   }
-
-  spin_unlock(lock, lock_num);
 }
 
 static inline bool find_key_in_report(hid_keyboard_report_t const* report, uint8_t keycode) {
@@ -680,34 +824,26 @@ void setNeoColor(uint8_t r, uint8_t g, uint8_t b) {
 
 // Invoked when a device with MassStorage interface is mounted
 void tuh_msc_mount_cb(uint8_t dev_addr) {
-  uint32_t lock_num = spin_lock_blocking(lock);
   printout("\n[++] Mass Device");
   setNeoColor(0, 255, 0);  // Verde
   SerialTinyUSB.printf("Mass Device attached, address = %d\r\n", dev_addr);
-  spin_unlock(lock, lock_num);
 }
 
 // Invoked when a device with MassStorage interface is unmounted
 void tuh_msc_umount_cb(uint8_t dev_addr) {
-  uint32_t lock_num = spin_lock_blocking(lock);
   SerialTinyUSB.printf("Mass Device unmounted, address = %d\r\n", dev_addr);
-  spin_unlock(lock, lock_num);
 }
 
 // Invoked when a device with CDC (Communication Device Class) interface is mounted
 void tuh_cdc_mount_cb(uint8_t idx) {
-  uint32_t lock_num = spin_lock_blocking(lock);
   printout("\n[++] CDC Device");
   setNeoColor(0, 255, 0);  // Verde
   SerialTinyUSB.printf("CDC Device attached, idx = %d\r\n", idx);
-  spin_unlock(lock, lock_num);
 }
 
 // Invoked when a device with CDC (Communication Device Class) interface is unmounted
 void tuh_cdc_umount_cb(uint8_t idx) {
-  uint32_t lock_num = spin_lock_blocking(lock);
   SerialTinyUSB.printf("CDC Device unmounted, idx = %d\r\n", idx);
-  spin_unlock(lock, lock_num);
 }
 
 // END of OTHER Host devices detector section
