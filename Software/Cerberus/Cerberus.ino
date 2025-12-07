@@ -23,7 +23,6 @@
 #include "Adafruit_TinyUSB.h"
 #include <XxHash_arduino.h>
 #include <pico/stdlib.h>
-#include "tusb.h"             // TinyUSB core (para structs SCSI)
 #include <hardware/pio.h>     // PIO definitions (fixes missing pio.h)
 #include <hardware/clocks.h>  // set_sys_clock_khz
 #include <hardware/sync.h>    // spin_lock_*
@@ -93,10 +92,6 @@ boolean hid_sent = false;
 boolean hid_reported = false;
 boolean usbkiller = false;
 uint hid_event_num = 0;
-static bool msc_info_pending = false;
-static uint8_t msc_pending_addr = 0;
-static uint8_t msc_info_attempts = 0;
-static uint32_t msc_last_attempt_ms = 0;
 
 static spin_lock_t *lock;
 Adafruit_NeoPixel statusPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -271,23 +266,6 @@ void loop() {
     hid_sent = false;
     hid_reported = true;
     setNeoColor(255, 0, 0);       // Rojo
-  }
-
-  // Si hay info de MSC pendiente, reintenta hasta que arranquen las peticiones
-  if (msc_info_pending) {
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (!tuh_msc_mounted(msc_pending_addr)) {
-      msc_info_pending = false;  // dispositivo desmontado o error
-    } else if (now - msc_last_attempt_ms >= 300) {
-      msc_last_attempt_ms = now;
-      msc_info_attempts++;
-      if (log_msc_info(msc_pending_addr)) {
-        msc_info_pending = false;
-      } else if (msc_info_attempts > 10) {
-        SerialTinyUSB.println("MSC info: giving up after multiple attempts");
-        msc_info_pending = false;
-      }
-    }
   }
 
   if (BOOTSEL) {
@@ -694,59 +672,6 @@ void setNeoColor(uint8_t r, uint8_t g, uint8_t b) {
   statusPixel.show();
 }
 
-// Log de info SCSI/MSC
-static inline uint32_t be32_to_cpu(uint32_t v) {
-  return __builtin_bswap32(v);
-}
-
-bool msc_inquiry_done_cb(uint8_t dev_addr, tuh_msc_complete_data_t const* cb_data) {
-  scsi_inquiry_resp_t* inquiry = (scsi_inquiry_resp_t*)cb_data->user_arg;
-  if (!cb_data->csw || cb_data->csw->status != 0 || !inquiry) {
-    SerialTinyUSB.println("MSC Info: inquiry failed");
-    return true;
-  }
-  char vendor[9] = {0};
-  char product[17] = {0};
-  char rev[5] = {0};
-  memcpy(vendor, inquiry->vendor_id, 8);
-  memcpy(product, inquiry->product_id, 16);
-  memcpy(rev, inquiry->product_rev, 4);
-  SerialTinyUSB.printf("MSC Info: Vendor=\"%s\" Product=\"%s\" Rev=\"%s\"\r\n", vendor, product, rev);
-  return true;
-}
-
-bool msc_capacity_done_cb(uint8_t dev_addr, tuh_msc_complete_data_t const* cb_data) {
-  scsi_read_capacity10_resp_t* cap = (scsi_read_capacity10_resp_t*)cb_data->user_arg;
-  if (!cb_data->csw || cb_data->csw->status != 0 || !cap) {
-    SerialTinyUSB.println("MSC Capacity: failed to read");
-    return true;
-  }
-  uint32_t last_lba = be32_to_cpu(cap->last_lba);
-  uint32_t block_size = be32_to_cpu(cap->block_size);
-  uint64_t block_count = (uint64_t)last_lba + 1;  // last LBA is zero-based
-  uint64_t total_bytes = block_count * (uint64_t)block_size;
-  float total_gb = (float)total_bytes / (1024.0f * 1024.0f * 1024.0f);
-  SerialTinyUSB.printf("MSC Capacity: %llu blocks x %lu bytes = %.2f GB\r\n",
-                       (unsigned long long)block_count,
-                       (unsigned long)block_size,
-                       total_gb);
-  return true;
-}
-
-bool log_msc_info(uint8_t dev_addr) {
-  static scsi_inquiry_resp_t inquiry_resp;
-  static scsi_read_capacity10_resp_t cap_resp;
-
-  if (!tuh_msc_inquiry(dev_addr, 0, &inquiry_resp, msc_inquiry_done_cb, (uintptr_t)&inquiry_resp)) {
-    return false;
-  }
-  if (!tuh_msc_read_capacity(dev_addr, 0, &cap_resp, msc_capacity_done_cb, (uintptr_t)&cap_resp)) {
-    return false;
-  }
-  SerialTinyUSB.flush();
-  return true;
-}
-
 // END of BADUSB detector section
 
 //
@@ -759,10 +684,6 @@ void tuh_msc_mount_cb(uint8_t dev_addr) {
   printout("\n[++] Mass Device");
   setNeoColor(0, 255, 0);  // Verde
   SerialTinyUSB.printf("Mass Device attached, address = %d\r\n", dev_addr);
-  msc_info_pending = true;
-  msc_pending_addr = dev_addr;
-  msc_info_attempts = 0;
-  msc_last_attempt_ms = to_ms_since_boot(get_absolute_time());
   spin_unlock(lock, lock_num);
 }
 

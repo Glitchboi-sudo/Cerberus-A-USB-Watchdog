@@ -52,7 +52,7 @@ git clone https://github.com/Glitchboi-sudo/Cerberus-A-USB-Watchdog.git
 ```
 
 Con Arduino IDE
-- Abre el proyecto `.ino` en software/
+- Abre `Software/Cerberus/Cerberus.ino` (la carpeta ya coincide con el nombre del sketch, el IDE no pedira moverlo).
 - Conecta  la Raspberry Pi Pico con un cable USB
 - Selecciona la Pico en Arduino
 - Click en `Upload`
