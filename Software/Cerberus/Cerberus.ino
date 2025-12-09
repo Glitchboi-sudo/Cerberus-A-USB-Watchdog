@@ -77,6 +77,13 @@ typedef struct {
   char text[64];
 } DisplayMsg;
 
+// Forward declarations
+void cls(void);
+void show_descriptor_page();
+void exit_descriptor_view();
+dev_info_t* get_first_mounted_device();
+void reinit_display();
+
 // Define the dimension of RAM DISK. We have a "real" one (for which
 // a real array is created) and a "fake" one, presented to the OS
 #define DISK_BLOCK_NUM 0x150
@@ -112,6 +119,8 @@ boolean deleted_reported = false;
 boolean hid_sent = false;
 boolean hid_reported = false;
 boolean usbkiller = false;
+bool descriptor_view_active = false;
+uint8_t descriptor_page = 0;
 uint hid_event_num = 0;
 
 Adafruit_NeoPixel statusPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -186,6 +195,7 @@ void setup() {
   usb_msc.setUnitReady(true);
 
   pinMode(BTN_RST, INPUT_PULLUP);
+  pinMode(BTN_OK, INPUT_PULLUP);
 
   //USB Killer Detection Setup
    pinMode(KILLER_PIN, INPUT_PULLUP);
@@ -242,17 +252,47 @@ void loop() {
   // Drain any text queued from host callbacks (running on core1)
   DisplayMsg msg;
   while (queue_try_remove(&display_queue, &msg)) {
-    printout(msg.text);
+    if (descriptor_view_active) {
+      SerialTinyUSB.println(msg.text);
+    } else {
+      printout(msg.text);
+    }
   }
 
   static bool rst_prev = true;
   bool rst_now = digitalRead(BTN_RST);
   if (rst_now != rst_prev) {
-    SerialTinyUSB.printf("BTN_RST %s\n", rst_now == LOW ? "PRESSED -> resetting" : "released");
+    SerialTinyUSB.printf("BTN_RST %s\n", rst_now == LOW ? "PRESSED -> descriptors" : "released");
     rst_prev = rst_now;
     if (rst_now == LOW) {
-      swreset();
+      if (descriptor_view_active == false) {
+        descriptor_view_active = true;
+        descriptor_page = 0;
+      } else {
+        descriptor_page++;
+      }
+      show_descriptor_page();
     }
+  }
+
+  static bool ok_prev = true;
+  bool ok_now = digitalRead(BTN_OK);
+  if (ok_now != ok_prev) {
+    ok_prev = ok_now;
+    if (ok_now == LOW) {
+      if (descriptor_view_active) {
+        SerialTinyUSB.println("BTN_OK pressed -> exit descriptor view");
+        exit_descriptor_view();
+      } else {
+        // Refresh pantalla principal si se queda en blanco
+        SerialTinyUSB.println("BTN_OK pressed -> refresh display");
+        reinit_display();
+      }
+    }
+  }
+
+  if (descriptor_view_active) {
+    return;
   }
 
   if (usbkiller == true) {
@@ -447,6 +487,60 @@ void printout(const char *str)
   SerialTinyUSB.println(str);
 }
 
+dev_info_t* get_first_mounted_device() {
+  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+    if (dev_info[i].mounted) {
+      return &dev_info[i];
+    }
+  }
+  return NULL;
+}
+
+void show_descriptor_page() {
+  cls();
+  dev_info_t* dev = get_first_mounted_device();
+  if (dev == NULL) {
+    printout("\n[!] Sin dispositivos");
+    return;
+  }
+
+  tusb_desc_device_t *desc = &dev->desc_device;
+  char buf[48];
+  uint8_t page = descriptor_page % 3;
+
+  if (page == 0) {
+    printout("\n[Desc 1/3]");
+    snprintf(buf, sizeof(buf), "\nVID:%04X PID:%04X", desc->idVendor, desc->idProduct);
+    printout(buf);
+    snprintf(buf, sizeof(buf), "\nUSB:%04X Dev:%04X", desc->bcdUSB, desc->bcdDevice);
+    printout(buf);
+    snprintf(buf, sizeof(buf), "\nCls:%u Sub:%u Proto:%u", desc->bDeviceClass, desc->bDeviceSubClass, desc->bDeviceProtocol);
+    printout(buf);
+  } else if (page == 1) {
+    printout("\n[Desc 2/3]");
+    snprintf(buf, sizeof(buf), "\nPkt0:%u Config:%u", desc->bMaxPacketSize0, desc->bNumConfigurations);
+    printout(buf);
+    snprintf(buf, sizeof(buf), "\nManu ID:%u Prod ID:%u", desc->iManufacturer, desc->iProduct);
+    printout(buf);
+    snprintf(buf, sizeof(buf), "\nSerial ID:%u", desc->iSerialNumber);
+    printout(buf);
+  } else {
+    printout("\n[Desc 3/3]");
+    snprintf(buf, sizeof(buf), "\nManu: %s", (char *)dev->manufacturer);
+    printout(buf);
+    snprintf(buf, sizeof(buf), "\nProd: %s", (char *)dev->product);
+    printout(buf);
+    snprintf(buf, sizeof(buf), "\nSerial: %s", (char *)dev->serial);
+    printout(buf);
+  }
+}
+
+void exit_descriptor_view() {
+  descriptor_view_active = false;
+  descriptor_page = 0;
+  cls();
+}
+
 // Clear display
 void cls(void) {
   display.clearDisplay();
@@ -454,6 +548,17 @@ void cls(void) {
   display.setCursor(0, 0);
   printout(VERSION);
   printout("\n-----------------");
+}
+
+void reinit_display() {
+  // Reintenta inicializar la OLED y repinta cabecera básica
+  Wire.setSDA(4);
+  Wire.setSCL(5);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS)) {
+    SerialTinyUSB.println("OLED reinit failed");
+    return;
+  }
+  cls();
 }
 
 // HexDump
