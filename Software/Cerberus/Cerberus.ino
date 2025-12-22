@@ -23,13 +23,15 @@
 #include "Adafruit_TinyUSB.h"
 #include <XxHash_arduino.h>
 #include <pico/stdlib.h>
-#include <hardware/clocks.h>  // set_sys_clock_khz
+#include <hardware/clocks.h> 
 #include <SPI.h>
 #include <Wire.h>
 #include <pico/util/queue.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+#include <string.h>
+#include "resources.h"
 
 extern "C" {
   #include "tusb.h"
@@ -46,7 +48,7 @@ extern "C" {
  * - CPU Speed must be either 120 or 240 Mhz. Selected via "Menu -> CPU Speed"
  */
 
-#define HOST_PIN_DP 0       // Pin used as D+ for host, D- = D+ + 1
+#define HOST_PIN_DP 10       // Pin used as D+ for host, D- = D+ + 1
 #define LANGUAGE_ID 0x0409  // English
 
 // USB Host object
@@ -67,7 +69,7 @@ dev_info_t dev_info[CFG_TUH_DEVICE_MAX] = { 0 };
 // END of BADUSB detector section
 
 #define I2C_ADDRESS 0x3C  // 0X3C+SA0 - 0x3C or 0x3D
-#define RST_PIN -1        // Sin pin de reset externo para la OLED
+#define RST_PIN -1        // No external reset pin required by this OLED
 #define OLED_WIDTH  128
 #define OLED_HEIGHT 64    // 64 or 32 depending on the OLED
 
@@ -83,6 +85,8 @@ void show_descriptor_page();
 void exit_descriptor_view();
 dev_info_t* get_first_mounted_device();
 void reinit_display();
+void showStatus(const char* message, uint8_t logoIndex);
+void draw(const char* text, uint8_t logoIndex);
 
 // Define the dimension of RAM DISK. We have a "real" one (for which
 // a real array is created) and a "fake" one, presented to the OS
@@ -93,23 +97,23 @@ void reinit_display();
 
 Adafruit_USBD_MSC usb_msc;
 
-// Botón de reset manual (GP3 a GND)
-#define BTN_RST 3
+// Manual reset button wired GP3 to GND
+#define BTN_RST 1
 
-// Botón de reset manual (GP6 a GND)
-#define BTN_OK 6
+// Manual OK button wired GP6 to GND
+#define BTN_OK 0
 
 //
 // USBKiller Globals
 //
 #define KILLER_PIN 8
-#define NEOPIXEL_PIN 29
+#define NEOPIXEL_PIN 16
 #define NEOPIXEL_COUNT 1
 
 //
 // USBvalve globals
 //
-#define VERSION "Cerberus - 0.1.5"
+#define VERSION "Cerberus - 0.1.6"
 boolean readme = false;
 boolean autorun = false;
 boolean written = false;
@@ -122,6 +126,8 @@ boolean usbkiller = false;
 bool descriptor_view_active = false;
 uint8_t descriptor_page = 0;
 uint hid_event_num = 0;
+char current_gui_message[64] = "Cerberus Ready";
+uint8_t current_logo_index = LOGO_USB_CONNECTED;
 
 Adafruit_NeoPixel statusPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 queue_t display_queue;  // Thread-safe queue for cross-core OLED messages
@@ -157,14 +163,14 @@ queue_t display_queue;  // Thread-safe queue for cross-core OLED messages
 // Burned hash to check consistency
 uint valid_hash = 2362816530;
 
-// Main USB Killer code
+// Main USB killer detector. Raises a software flag when a hostile voltage discharge is detected.
 void detectUSBKiller() {
   if (digitalRead(KILLER_PIN) == LOW) {
     usbkiller = true;
   }
 }
 
-// Core 0 Setup: will be used for the USB mass device functions
+// Core 0 setup: configures TinyUSB device mode, RAM disk emulation, I2C display, and status LED.
 void setup() {
   // Init queue used to pass text from host callbacks (core1) to OLED (core0)
   queue_init(&display_queue, sizeof(DisplayMsg), 16);
@@ -197,9 +203,9 @@ void setup() {
   pinMode(BTN_RST, INPUT_PULLUP);
   pinMode(BTN_OK, INPUT_PULLUP);
 
-  //USB Killer Detection Setup
-   pinMode(KILLER_PIN, INPUT_PULLUP);
-   attachInterrupt(digitalPinToInterrupt(KILLER_PIN), detectUSBKiller, FALLING);
+  // USB killer detection wiring and interrupt setup
+  pinMode(KILLER_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(KILLER_PIN), detectUSBKiller, FALLING);
 
   // Check consistency of RAM FS
   // Add 11 bytes to skip the DISK_LABEL from the hashing
@@ -217,16 +223,17 @@ void setup() {
   display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS);
 
   cls();  // Clear display
+  draw(current_gui_message, current_logo_index);
   statusPixel.begin();
   statusPixel.setBrightness(50);
-  setNeoColor(0, 0, 255);  // Azul como estado inicial
+  setNeoColor(0, 0, 255);  // Blue as the initial neutral status
 
   // Now outputs the result of the check
   if (computed_hash == valid_hash) {
-    printout("\n[+] Selftest: OK");
+    showStatus("Selftest: OK", LOGO_USB_CONNECTED);
   } else {
-    printout("\n[!] Selftest: KO");
-    printout("\n[!] Stopping...");
+    showStatus("Selftest: KO", LOGO_ALERT_SYMBOL);
+    showStatus("Stopping...", LOGO_ALERT_SYMBOL);
     while (1) {
       delay(1000);  // Loop forever
     }
@@ -234,7 +241,7 @@ void setup() {
 
 }
 
-// Core 1 Setup: will be used for the USB host functions for BADUSB detector
+// Core 1 setup: brings up TinyUSB host stack and PIO USB bridge for BADUSB monitoring.
 void setup1() {
   set_sys_clock_khz(240000, true);
   pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
@@ -255,7 +262,7 @@ void loop() {
     if (descriptor_view_active) {
       SerialTinyUSB.println(msg.text);
     } else {
-      printout(msg.text);
+      showStatus(msg.text, LOGO_USB_CONNECTED);
     }
   }
 
@@ -284,7 +291,7 @@ void loop() {
         SerialTinyUSB.println("BTN_OK pressed -> exit descriptor view");
         exit_descriptor_view();
       } else {
-        // Refresh pantalla principal si se queda en blanco
+        // Force a redraw of the main screen if it was cleared unexpectedly
         SerialTinyUSB.println("BTN_OK pressed -> refresh display");
         reinit_display();
       }
@@ -296,42 +303,42 @@ void loop() {
   }
 
   if (usbkiller == true) {
-    printout("\n[!!] USB Killer");
+    showStatus("USB Killer", LOGO_EVIL_SYMBOL);
     usbkiller = false;
-    setNeoColor(255, 0, 0);       // Rojo
+    setNeoColor(255, 0, 0);       // Red
   }
 
   if (readme == true) {
-    printout("\n[!] README (R)");
+    showStatus("README (R)", LOGO_USB_CONNECTED);
     readme = false;
-    setNeoColor(0, 0, 255);       // Azul
+    setNeoColor(0, 0, 255);       // Blue
   }
 
   if (autorun == true) {
-    printout("\n[+] AUTORUN (R)");
+    showStatus("AUTORUN (R)", LOGO_USB_CONNECTED);
     autorun = false;
-    setNeoColor(0, 0, 255);       // Azul
+    setNeoColor(0, 0, 255);       // Blue
   }
 
   if (deleted == true && deleted_reported == false) {
-    printout("\n[!] DELETING");
+    showStatus("DELETING", LOGO_USB_CONNECTED);
     deleted = false;
     deleted_reported = true;
-    setNeoColor(0, 0, 255);       // Azul
+    setNeoColor(0, 0, 255);       // Blue
   }
 
   if (written == true && written_reported == false) {
-    printout("\n[!] WRITING");
+    showStatus("WRITING", LOGO_USB_CONNECTED);
     written = false;
     written_reported = true;
-    setNeoColor(0, 0, 255);       // Azul
+    setNeoColor(0, 0, 255);       // Blue
   }
 
   if (hid_sent == true && hid_reported == false) {
-    printout("\n[!!] HID Sending data");
+    showStatus("HID Sending data", LOGO_ALERT_SYMBOL);
     hid_sent = false;
     hid_reported = true;
-    setNeoColor(255, 0, 0);       // Rojo
+    setNeoColor(255, 0, 0);       // Red
   }
 
   if (BOOTSEL) {
@@ -345,10 +352,10 @@ void loop() {
     if (press_duration > 2000) {              // Press duration > 2sec
       // Print the number of HID events detected so far
       char outstr[22];
-      snprintf(outstr, 21, "\n[+] HID Evt# %d", hid_event_num);
-      printout(outstr);
+      snprintf(outstr, sizeof(outstr), "HID Evt# %d", hid_event_num);
+      showStatus(outstr, LOGO_USB_CONNECTED);
     } else {
-      printout("\n[+] RESETTING");
+      showStatus("RESETTING", LOGO_USB_CONNECTED);
       swreset();
     }
   }
@@ -487,6 +494,27 @@ void printout(const char *str)
   SerialTinyUSB.println(str);
 }
 
+// Updates the cached GUI message/icon and mirrors the same text over serial.
+void showStatus(const char* str, uint8_t logoIndex) {
+  const char* sanitized = str;
+  while (*sanitized == '\n') {
+    sanitized++;
+  }
+
+  if (LOGO_COUNT > 0) {
+    current_logo_index = logoIndex % LOGO_COUNT;
+  } else {
+    current_logo_index = 0;
+  }
+  strncpy(current_gui_message, sanitized, sizeof(current_gui_message) - 1);
+  current_gui_message[sizeof(current_gui_message) - 1] = '\0';
+
+  if (!descriptor_view_active) {
+    draw(current_gui_message, current_logo_index);
+  }
+  SerialTinyUSB.println(str);
+}
+
 dev_info_t* get_first_mounted_device() {
   for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
     if (dev_info[i].mounted) {
@@ -496,11 +524,12 @@ dev_info_t* get_first_mounted_device() {
   return NULL;
 }
 
+// Prints the currently selected descriptor page to both OLED and serial consoles.
 void show_descriptor_page() {
   cls();
   dev_info_t* dev = get_first_mounted_device();
   if (dev == NULL) {
-    printout("\n[!] Sin dispositivos");
+    printout("\n[!] No devices");
     return;
   }
 
@@ -535,10 +564,12 @@ void show_descriptor_page() {
   }
 }
 
+// Returns to the normal GUI once the descriptor view button is released.
 void exit_descriptor_view() {
   descriptor_view_active = false;
   descriptor_page = 0;
   cls();
+  draw(current_gui_message, current_logo_index);
 }
 
 // Clear display
@@ -546,12 +577,11 @@ void cls(void) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  printout(VERSION);
-  printout("\n-----------------");
+  display.display();
 }
 
 void reinit_display() {
-  // Reintenta inicializar la OLED y repinta cabecera básica
+  // Retry OLED initialization and redraw the cached header
   Wire.setSDA(4);
   Wire.setSCL(5);
   if (!display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS)) {
@@ -559,6 +589,7 @@ void reinit_display() {
     return;
   }
   cls();
+  draw(current_gui_message, current_logo_index);
 }
 
 // HexDump
@@ -774,7 +805,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
   tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-  printout("\n[!!] HID Device");
+  showStatus("HID Device", LOGO_ALERT_SYMBOL);
   setNeoColor(255, 0, 0);       // Rojo
 
   SerialTinyUSB.printf("HID device address = %d, instance = %d mounted\r\n", dev_addr, instance);
@@ -929,6 +960,10 @@ static void check_special_key(uint8_t code) {
   if (code == HID_KEY_KEYPAD_SUBTRACT) SerialTinyUSB.print("<KEYPAD_SUB>");
   if (code == HID_KEY_KEYPAD_ADD) SerialTinyUSB.print("<KEYPAD_ADD>");
   if (code == HID_KEY_KEYPAD_DECIMAL) SerialTinyUSB.print("<KEYPAD_DECIMAL>");
+  if (code == HID_KEY_CONTROL_LEFT || code == HID_KEY_CONTROL_RIGHT) SerialTinyUSB.print("<CTRL>");
+  if (code == HID_KEY_ALT_LEFT || code == HID_KEY_ALT_RIGHT) SerialTinyUSB.print("<ALT>");
+  if (code == HID_KEY_GUI_LEFT || code == HID_KEY_GUI_RIGHT) SerialTinyUSB.print("<WIN>");
+  if (code == HID_KEY_APPLICATION) SerialTinyUSB.print("<FN>");
 }
 
 static void process_mouse_report(hid_mouse_report_t const* report) {
@@ -946,10 +981,12 @@ static void process_mouse_report(hid_mouse_report_t const* report) {
   cursor_movement(report->x, report->y, report->wheel);
 }
 
+// Logs relative mouse movement for debugging.
 void cursor_movement(int8_t x, int8_t y, int8_t wheel) {
   SerialTinyUSB.printf("(%d %d %d)\r\n", x, y, wheel);
 }
 
+// Sets the RGB status pixel to the requested color.
 void setNeoColor(uint8_t r, uint8_t g, uint8_t b) {
   statusPixel.setPixelColor(0, statusPixel.Color(r, g, b));
   statusPixel.show();
@@ -963,8 +1000,8 @@ void setNeoColor(uint8_t r, uint8_t g, uint8_t b) {
 
 // Invoked when a device with MassStorage interface is mounted
 void tuh_msc_mount_cb(uint8_t dev_addr) {
-  printout("\n[++] Mass Device");
-  setNeoColor(0, 255, 0);  // Verde
+  showStatus("Mass Device", LOGO_USB_CONNECTED);
+  setNeoColor(0, 255, 0);  // Green
   SerialTinyUSB.printf("Mass Device attached, address = %d\r\n", dev_addr);
 }
 
@@ -975,8 +1012,8 @@ void tuh_msc_umount_cb(uint8_t dev_addr) {
 
 // Invoked when a device with CDC (Communication Device Class) interface is mounted
 void tuh_cdc_mount_cb(uint8_t idx) {
-  printout("\n[++] CDC Device");
-  setNeoColor(0, 255, 0);  // Verde
+  showStatus("CDC Device", LOGO_USB_CONNECTED);
+  setNeoColor(0, 255, 0);  // Green
   SerialTinyUSB.printf("CDC Device attached, idx = %d\r\n", idx);
 }
 
@@ -986,3 +1023,39 @@ void tuh_cdc_umount_cb(uint8_t idx) {
 }
 
 // END of OTHER Host devices detector section
+
+
+// GUI renderer: draws a static frame plus the selected icon and status text.
+void draw(const char* text, uint8_t logoIndex) {
+    // Clear the entire framebuffer to avoid leftover pixels from earlier frames
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextWrap(false);
+
+    // Header
+    display.setCursor(0, 0);
+    display.println("Cerberus");
+    display.drawBitmap(51, 0, image_Lock_bits, 7, 8, SSD1306_WHITE);
+
+    // Footer / soft-keys
+    display.setCursor(12, 54);
+    display.println("OK");
+    display.drawBitmap(98, 55, image_arrow_curved_left_up_bits, 8, 5, SSD1306_WHITE);
+    display.setCursor(109, 54);
+    display.println("Bak");
+    display.drawBitmap(2, 54, image_Quest_bits, 7, 8, SSD1306_WHITE);
+
+    // Main icon
+    const LogoAsset& asset = LOGO_ASSETS[(LOGO_COUNT > 0) ? (logoIndex % LOGO_COUNT) : 0];
+    display.drawBitmap(50, 16, asset.bits, asset.width, asset.height, SSD1306_WHITE);
+
+    // Center the label horizontally on y = 36
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+    int16_t x = (int16_t)((OLED_WIDTH - (int16_t)w) / 2);
+    if (x < 0) x = 0;
+    display.setCursor(x, 36);
+    display.println(text);
+    display.display();
+}
