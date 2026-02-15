@@ -1,6 +1,6 @@
 /*********************************************************************
 
-  USBProtector
+  Cerberus
   
   written by Cesare Pizzi && Glitchboi
   This project extensively reuse code done by Adafruit and TinyUSB. 
@@ -31,6 +31,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
 #include <string.h>
+#include <ctype.h>
 #include "resources.h"
 
 extern "C" {
@@ -113,7 +114,7 @@ Adafruit_USBD_MSC usb_msc;
 //
 // USBvalve globals
 //
-#define VERSION "Cerberus - 0.1.6"
+#define VERSION "Cerberus - 0.4.0"
 boolean readme = false;
 boolean autorun = false;
 boolean written = false;
@@ -123,11 +124,66 @@ boolean deleted_reported = false;
 boolean hid_sent = false;
 boolean hid_reported = false;
 boolean usbkiller = false;
+boolean suspicious_device = false;
+boolean suspicious_reported = false;
+char suspicious_name[16] = {0};
 bool descriptor_view_active = false;
 uint8_t descriptor_page = 0;
 uint hid_event_num = 0;
 char current_gui_message[64] = "Cerberus Ready";
 uint8_t current_logo_index = LOGO_USB_CONNECTED;
+
+//
+// HID Speed Detection - Detects automated typing (BadUSB)
+//
+#define HID_SPEED_WINDOW_MS 1000    // Window to measure speed (1 second)
+#define HID_SPEED_THRESHOLD 40      // Keys per second threshold for automation
+uint32_t hid_window_start = 0;
+uint16_t hid_window_count = 0;
+float hid_current_speed = 0;
+boolean hid_speed_alert = false;
+boolean hid_speed_reported = false;
+
+//
+// Serial Command Interface
+//
+#define SERIAL_BUFFER_SIZE 64
+char serial_buffer[SERIAL_BUFFER_SIZE];
+uint8_t serial_buffer_idx = 0;
+
+//
+// Verbose Mode - Reduce serial output when disabled
+//
+boolean verbose_mode = true;        // Default: verbose on
+boolean show_hexdump = false;       // Default: hexdump off (reduces noise)
+boolean show_hid_debug = false;     // Default: HID debug off (shows raw modifier bytes)
+
+//
+// Last Device Info (for forensics) - Stored in RAM, survives soft reset
+//
+typedef struct {
+  uint16_t vid;
+  uint16_t pid;
+  uint8_t device_class;
+  uint8_t device_subclass;
+  char manufacturer[32];
+  char product[48];
+  char serial[16];
+  uint32_t timestamp;
+  uint16_t hid_events;
+  float max_hid_speed;
+  bool was_suspicious;
+  char suspicious_reason[16];
+} last_device_info_t;
+
+last_device_info_t last_device __attribute__((section(".noinit")));  // Survives soft reset
+
+// Forward declarations for new functions
+void process_serial_command(const char* cmd);
+void print_status();
+void print_last_device();
+void save_device_info(dev_info_t* dev, tusb_desc_device_t* desc);
+void update_hid_speed();
 
 Adafruit_NeoPixel statusPixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 queue_t display_queue;  // Thread-safe queue for cross-core OLED messages
@@ -153,6 +209,83 @@ queue_t display_queue;  // Thread-safe queue for cross-core OLED messages
 #define USB_VENDORID_STR "Kingston"       // Up to 8 chars
 #define USB_PRODUCTID_STR "DataTraveler"  // Up to 16 chars
 #define USB_VERSION_STR "1.0"             // Up to 4 chars
+
+//
+// Suspicious VID/PID Database
+// Known BadUSB, HID attack tools, and devices commonly used for USB attacks
+// Stored in flash to save RAM
+//
+typedef struct {
+  uint16_t vid;
+  uint16_t pid;        // 0x0000 = match any PID for this VID
+  const char* name;
+} suspicious_device_t;
+
+const suspicious_device_t SUSPICIOUS_DEVICES[] PROGMEM = {
+  // Hak5 Rubber Ducky (often spoofs Apple)
+  {0x05AC, 0x0000, "Apple(Spoof?)"},
+
+  // DigiSpark / ATtiny85 USB devices
+  {0x16C0, 0x0477, "DigiSpark"},
+  {0x16C0, 0x05DF, "USBasp/Digi"},
+  {0x16C0, 0x27DB, "HID Digi"},
+  {0x16C0, 0x27DA, "CDC Digi"},
+
+  // Teensy boards (commonly used for BadUSB)
+  {0x16C0, 0x0486, "Teensy HID"},
+  {0x16C0, 0x0487, "Teensy MIDI"},
+  {0x16C0, 0x0488, "Teensy Serial"},
+  {0x16C0, 0x04D0, "Teensy40 HID"},
+  {0x16C0, 0x04D1, "Teensy40 Ser"},
+
+  // Arduino Leonardo/Micro (HID capable)
+  {0x2341, 0x8036, "Arduino Leo"},
+  {0x2341, 0x8037, "Arduino Micro"},
+  {0x2341, 0x0036, "Arduino Leo BL"},
+  {0x2341, 0x0037, "Arduino Micro BL"},
+
+  // SparkFun Pro Micro
+  {0x1B4F, 0x9205, "ProMicro 5V"},
+  {0x1B4F, 0x9206, "ProMicro 3.3V"},
+  {0x1B4F, 0x9207, "LilyPad USB"},
+
+  // Malduino / CJMCU BadUSB
+  {0x1B4F, 0x0000, "Malduino?"},
+
+  // Flipper Zero
+  {0x0483, 0x5740, "Flipper Zero"},
+
+  // O.MG Cable (various spoofed VIDs)
+  {0x046D, 0xC52B, "Logitech(OMG?)"},
+
+  // Generic CH340/CH341 (common in cheap clones)
+  {0x1A86, 0x7523, "CH340"},
+  {0x1A86, 0x5523, "CH341"},
+
+  // USBarmory
+  {0x0525, 0xA4A6, "USBarmory"},
+
+  // LAN Turtle / Packet Squirrel
+  {0x0525, 0xA4A7, "LAN Turtle?"},
+
+  // Raspberry Pi Pico (could be BadUSB)
+  {0x2E8A, 0x0005, "RPi Pico HID"},
+
+  // ESP32-S2/S3 USB
+  {0x303A, 0x0002, "ESP32-S2"},
+  {0x303A, 0x1001, "ESP32-S3"},
+
+  // ATEN UC-232A (used in some attacks)
+  {0x0557, 0x2008, "ATEN Serial"},
+
+  // End marker
+  {0x0000, 0x0000, NULL}
+};
+
+#define SUSPICIOUS_COUNT (sizeof(SUSPICIOUS_DEVICES) / sizeof(SUSPICIOUS_DEVICES[0]) - 1)
+
+// Forward declaration
+const char* check_suspicious_device(uint16_t vid, uint16_t pid);
 
 #define BLOCK_AUTORUN 102       // Block where Autorun.inf file is saved
 #define BLOCK_README 100        // Block where README.txt file is saved
@@ -256,6 +389,20 @@ void setup1() {
 
 // Main Core0 loop: managing display
 void loop() {
+  // Process serial commands
+  while (SerialTinyUSB.available()) {
+    char c = SerialTinyUSB.read();
+    if (c == '\n' || c == '\r') {
+      if (serial_buffer_idx > 0) {
+        serial_buffer[serial_buffer_idx] = '\0';
+        process_serial_command(serial_buffer);
+        serial_buffer_idx = 0;
+      }
+    } else if (serial_buffer_idx < SERIAL_BUFFER_SIZE - 1) {
+      serial_buffer[serial_buffer_idx++] = c;
+    }
+  }
+
   // Drain any text queued from host callbacks (running on core1)
   DisplayMsg msg;
   while (queue_try_remove(&display_queue, &msg)) {
@@ -341,6 +488,29 @@ void loop() {
     setNeoColor(255, 0, 0);       // Red
   }
 
+  if (suspicious_device == true && suspicious_reported == false) {
+    char alert_msg[24];
+    snprintf(alert_msg, sizeof(alert_msg), "SUSP: %s", suspicious_name);
+    showStatus(alert_msg, LOGO_EVIL_SYMBOL);
+    suspicious_device = false;
+    suspicious_reported = true;
+    setNeoColor(255, 165, 0);     // Orange for suspicious
+  }
+
+  // HID Speed detection - automated typing alert
+  if (hid_speed_alert == true && hid_speed_reported == false) {
+    char speed_msg[24];
+    snprintf(speed_msg, sizeof(speed_msg), "AUTO %.0f k/s", hid_current_speed);
+    showStatus(speed_msg, LOGO_EVIL_SYMBOL);
+    SerialTinyUSB.printf("[!!!] AUTOMATED TYPING: %.1f keys/sec\r\n", hid_current_speed);
+    hid_speed_reported = true;
+    setNeoColor(255, 0, 255);     // Magenta for automated typing
+    // Update last device info
+    if (hid_current_speed > last_device.max_hid_speed) {
+      last_device.max_hid_speed = hid_current_speed;
+    }
+  }
+
   if (BOOTSEL) {
     uint32_t press_start = to_ms_since_boot(get_absolute_time());
     while (BOOTSEL) {
@@ -390,14 +560,16 @@ int32_t msc_read_callback(uint32_t lba, void* buffer, uint32_t bufsize) {
     memcpy(buffer, addr, bufsize);
   }
 
-  SerialTinyUSB.print("Read LBA: ");
-  SerialTinyUSB.print(lba);
-  SerialTinyUSB.print("   Size: ");
-  SerialTinyUSB.println(bufsize);
-  if (lba < DISK_BLOCK_NUM - 1) {
-    hexDump(msc_disk[lba], MAX_DUMP_BYTES);
+  if (verbose_mode) {
+    SerialTinyUSB.print("Read LBA: ");
+    SerialTinyUSB.print(lba);
+    SerialTinyUSB.print("   Size: ");
+    SerialTinyUSB.println(bufsize);
+    if (show_hexdump && lba < DISK_BLOCK_NUM - 1) {
+      hexDump(msc_disk[lba], MAX_DUMP_BYTES);
+    }
+    SerialTinyUSB.flush();
   }
-  SerialTinyUSB.flush();
 
   return bufsize;
 }
@@ -431,14 +603,16 @@ int32_t msc_write_callback(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
     memcpy(addr, buffer, bufsize);
   }
 
-  SerialTinyUSB.print("Write LBA: ");
-  SerialTinyUSB.print(lba);
-  SerialTinyUSB.print("   Size: ");
-  SerialTinyUSB.println(bufsize);
-  if (lba < DISK_BLOCK_NUM - 1) {
-    hexDump(msc_disk[lba], MAX_DUMP_BYTES);
+  if (verbose_mode) {
+    SerialTinyUSB.print("Write LBA: ");
+    SerialTinyUSB.print(lba);
+    SerialTinyUSB.print("   Size: ");
+    SerialTinyUSB.println(bufsize);
+    if (show_hexdump && lba < DISK_BLOCK_NUM - 1) {
+      hexDump(msc_disk[lba], MAX_DUMP_BYTES);
+    }
+    SerialTinyUSB.flush();
   }
-  SerialTinyUSB.flush();
 
   return bufsize;
 }
@@ -664,6 +838,11 @@ void tuh_umount_cb(uint8_t daddr)
 
   dev_info_t *dev = &dev_info[daddr - 1];
   dev->mounted = false;
+
+  // Reset suspicious device flags
+  suspicious_device = false;
+  suspicious_reported = false;
+  suspicious_name[0] = '\0';
 }
 
 static void print_device_descriptor(tuh_xfer_t *xfer)
@@ -676,6 +855,23 @@ static void print_device_descriptor(tuh_xfer_t *xfer)
   uint8_t const daddr = xfer->daddr;
   dev_info_t *dev = &dev_info[daddr - 1];
   tusb_desc_device_t *desc = &dev->desc_device;
+
+  // Save device info for forensics
+  save_device_info(dev, desc);
+
+  // Check if device is in suspicious list
+  const char* suspicious_match = check_suspicious_device(desc->idVendor, desc->idProduct);
+  if (suspicious_match != NULL) {
+    suspicious_device = true;
+    suspicious_reported = false;
+    strncpy(suspicious_name, suspicious_match, sizeof(suspicious_name) - 1);
+    suspicious_name[sizeof(suspicious_name) - 1] = '\0';
+    SerialTinyUSB.printf("\r\n[!!!] SUSPICIOUS DEVICE: %s\r\n", suspicious_match);
+
+    // Update forensics info
+    last_device.was_suspicious = true;
+    strncpy(last_device.suspicious_reason, suspicious_match, sizeof(last_device.suspicious_reason) - 1);
+  }
 
   // Show a short summary on the OLED/serial right away
   char summary[48];
@@ -884,32 +1080,80 @@ static void process_kbd_report(hid_keyboard_report_t const* report) {
   // Previous report to check key released
   static hid_keyboard_report_t prev_report = { 0, 0, { 0 } };
 
+  // Debug: show raw modifier byte if enabled
+  if (show_hid_debug && report->modifier != 0) {
+    SerialTinyUSB.printf("[mod=0x%02X]", report->modifier);
+  }
+
   for (uint8_t i = 0; i < 6; i++) {
     if (report->keycode[i]) {
       if (find_key_in_report(&prev_report, report->keycode[i])) {
         // Exist in previous report means the current key is holding
       } else {
         // Not existed in previous report means the current key is pressed
+        uint8_t keycode = report->keycode[i];
 
-        // Check for modifiers. It looks that in specific cases, they are not correctly recognized (probably
-        // for timing issues in fast input)
-        bool const is_shift = report->modifier & (KEYBOARD_MODIFIER_LEFTSHIFT | KEYBOARD_MODIFIER_RIGHTSHIFT);
-        uint8_t ch = keycode2ascii[report->keycode[i]][is_shift ? 1 : 0];
+        // Debug: show raw keycode
+        if (show_hid_debug) {
+          SerialTinyUSB.printf("[key=0x%02X]", keycode);
+        }
 
-        bool const is_gui = report->modifier & (KEYBOARD_MODIFIER_LEFTGUI | KEYBOARD_MODIFIER_RIGHTGUI);
-        if (is_gui == true) SerialTinyUSB.printf("GUI+");
+        // Update HID speed tracking
+        update_hid_speed();
+        last_device.hid_events++;
 
-        bool const is_alt = report->modifier & (KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_RIGHTALT);
-        if (is_alt == true) SerialTinyUSB.printf("ALT+");
+        // Check for modifiers - use explicit masks to avoid false positives
+        bool const is_shift = (report->modifier & (KEYBOARD_MODIFIER_LEFTSHIFT | KEYBOARD_MODIFIER_RIGHTSHIFT)) != 0;
+        uint8_t ch = keycode2ascii[keycode][is_shift ? 1 : 0];
 
-        // Check for "special" keys
-        check_special_key(report->keycode[i]);
+        // Get the modifier byte
+        uint8_t mod = report->modifier;
 
-        // Finally, print out the decoded char
-        SerialTinyUSB.printf("%c", ch);
-        if (ch == '\r') SerialTinyUSB.print("\n");  // New line for enter
+        // Mask out the modifier bit if this keycode IS a modifier key being pressed
+        // (to avoid "CTRL+<CTRL>" when just pressing CTRL)
+        if (keycode == HID_KEY_CONTROL_LEFT || keycode == HID_KEY_CONTROL_RIGHT) {
+          mod &= ~(KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTCTRL);
+        }
+        if (keycode == HID_KEY_GUI_LEFT || keycode == HID_KEY_GUI_RIGHT) {
+          mod &= ~(KEYBOARD_MODIFIER_LEFTGUI | KEYBOARD_MODIFIER_RIGHTGUI);
+        }
+        if (keycode == HID_KEY_ALT_LEFT || keycode == HID_KEY_ALT_RIGHT) {
+          mod &= ~(KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_RIGHTALT);
+        }
 
-        fflush(stdout);  // flush right away, else nanolib will wait for newline
+        bool const is_ctrl = (mod & (KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTCTRL)) != 0;
+        bool const is_gui = (mod & (KEYBOARD_MODIFIER_LEFTGUI | KEYBOARD_MODIFIER_RIGHTGUI)) != 0;
+        bool const is_alt = (mod & (KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_RIGHTALT)) != 0;
+
+        // Check if this is a special key (returns true if it printed something)
+        bool is_special = is_special_key(keycode);
+
+        // Output with modifiers prefix only if a modifier is actually held
+        // AND we have something to output (not just a modifier key alone)
+        if ((is_ctrl || is_gui || is_alt) && (is_special || (ch >= 0x20 && ch < 0x7F))) {
+          if (is_ctrl) SerialTinyUSB.print("CTRL+");
+          if (is_gui) SerialTinyUSB.print("GUI+");
+          if (is_alt) SerialTinyUSB.print("ALT+");
+        }
+
+        // Output the key
+        if (is_special) {
+          // Already printed by is_special_key()
+        } else if (ch >= 0x20 && ch < 0x7F) {
+          // Printable ASCII character
+          SerialTinyUSB.printf("%c", ch);
+        } else if (ch == '\r') {
+          SerialTinyUSB.print("<ENTER>\n");
+        } else if (ch == '\t') {
+          SerialTinyUSB.print("<TAB>");
+        } else if (ch == '\b' || ch == 0x08) {
+          SerialTinyUSB.print("<BACKSPACE>");
+        } else if (ch == 0x1B) {
+          SerialTinyUSB.print("<ESC>");
+        }
+        // For non-printable chars without special handling, is_special_key already handled it
+
+        fflush(stdout);
       }
     }
   }
@@ -917,53 +1161,97 @@ static void process_kbd_report(hid_keyboard_report_t const* report) {
   prev_report = *report;
 }
 
-static void check_special_key(uint8_t code) {
+// Returns true if this is a special key and prints its marker
+static bool is_special_key(uint8_t code) {
+  const char* marker = NULL;
 
-  if (code == HID_KEY_ARROW_RIGHT) SerialTinyUSB.print("<ARROWRIGHT>");
-  if (code == HID_KEY_ARROW_LEFT) SerialTinyUSB.print("<ARROWLEFT>");
-  if (code == HID_KEY_ARROW_DOWN) SerialTinyUSB.print("<ARROWDOWN>");
-  if (code == HID_KEY_ARROW_UP) SerialTinyUSB.print("<ARROWUP>");
-  if (code == HID_KEY_HOME) SerialTinyUSB.print("<HOME>");
-  if (code == HID_KEY_KEYPAD_1) SerialTinyUSB.print("<KEYPAD_1>");
-  if (code == HID_KEY_KEYPAD_2) SerialTinyUSB.print("<KEYPAD_2>");
-  if (code == HID_KEY_KEYPAD_3) SerialTinyUSB.print("<KEYPAD_3>");
-  if (code == HID_KEY_KEYPAD_4) SerialTinyUSB.print("<KEYPAD_4>");
-  if (code == HID_KEY_KEYPAD_5) SerialTinyUSB.print("<KEYPAD_5>");
-  if (code == HID_KEY_KEYPAD_6) SerialTinyUSB.print("<KEYPAD_6>");
-  if (code == HID_KEY_KEYPAD_7) SerialTinyUSB.print("<KEYPAD_7>");
-  if (code == HID_KEY_KEYPAD_8) SerialTinyUSB.print("<KEYPAD_8>");
-  if (code == HID_KEY_KEYPAD_9) SerialTinyUSB.print("<KEYPAD_9>");
-  if (code == HID_KEY_KEYPAD_0) SerialTinyUSB.print("<KEYPAD_0>");
-  if (code == HID_KEY_F1) SerialTinyUSB.print("<F1>");
-  if (code == HID_KEY_F2) SerialTinyUSB.print("<F2>");
-  if (code == HID_KEY_F3) SerialTinyUSB.print("<F3>");
-  if (code == HID_KEY_F4) SerialTinyUSB.print("<F4>");
-  if (code == HID_KEY_F5) SerialTinyUSB.print("<F5>");
-  if (code == HID_KEY_F6) SerialTinyUSB.print("<F6>");
-  if (code == HID_KEY_F7) SerialTinyUSB.print("<F7>");
-  if (code == HID_KEY_F8) SerialTinyUSB.print("<F8>");
-  if (code == HID_KEY_F9) SerialTinyUSB.print("<F9>");
-  if (code == HID_KEY_F10) SerialTinyUSB.print("<F10>");
-  if (code == HID_KEY_F11) SerialTinyUSB.print("<F11>");
-  if (code == HID_KEY_F12) SerialTinyUSB.print("<F12>");
-  if (code == HID_KEY_PRINT_SCREEN) SerialTinyUSB.print("<PRNT>");
-  if (code == HID_KEY_SCROLL_LOCK) SerialTinyUSB.print("<SCRLL>");
-  if (code == HID_KEY_PAUSE) SerialTinyUSB.print("<PAUSE>");
-  if (code == HID_KEY_INSERT) SerialTinyUSB.print("<INSERT>");
-  if (code == HID_KEY_PAGE_UP) SerialTinyUSB.print("<PAGEUP>");
-  if (code == HID_KEY_DELETE) SerialTinyUSB.print("<DEL>");
-  if (code == HID_KEY_END) SerialTinyUSB.print("<END>");
-  if (code == HID_KEY_PAGE_DOWN) SerialTinyUSB.print("<PAGEDOWN>");
-  if (code == HID_KEY_NUM_LOCK) SerialTinyUSB.print("<ARROWRIGHT>");
-  if (code == HID_KEY_KEYPAD_DIVIDE) SerialTinyUSB.print("<KEYPAD_DIV>");
-  if (code == HID_KEY_KEYPAD_MULTIPLY) SerialTinyUSB.print("<KEYPAD_MUL>");
-  if (code == HID_KEY_KEYPAD_SUBTRACT) SerialTinyUSB.print("<KEYPAD_SUB>");
-  if (code == HID_KEY_KEYPAD_ADD) SerialTinyUSB.print("<KEYPAD_ADD>");
-  if (code == HID_KEY_KEYPAD_DECIMAL) SerialTinyUSB.print("<KEYPAD_DECIMAL>");
-  if (code == HID_KEY_CONTROL_LEFT || code == HID_KEY_CONTROL_RIGHT) SerialTinyUSB.print("<CTRL>");
-  if (code == HID_KEY_ALT_LEFT || code == HID_KEY_ALT_RIGHT) SerialTinyUSB.print("<ALT>");
-  if (code == HID_KEY_GUI_LEFT || code == HID_KEY_GUI_RIGHT) SerialTinyUSB.print("<WIN>");
-  if (code == HID_KEY_APPLICATION) SerialTinyUSB.print("<FN>");
+  switch (code) {
+    // Arrow keys
+    case HID_KEY_ARROW_RIGHT: marker = "<ARROWRIGHT>"; break;
+    case HID_KEY_ARROW_LEFT:  marker = "<ARROWLEFT>"; break;
+    case HID_KEY_ARROW_DOWN:  marker = "<ARROWDOWN>"; break;
+    case HID_KEY_ARROW_UP:    marker = "<ARROWUP>"; break;
+
+    // Navigation
+    case HID_KEY_HOME:      marker = "<HOME>"; break;
+    case HID_KEY_END:       marker = "<END>"; break;
+    case HID_KEY_PAGE_UP:   marker = "<PAGEUP>"; break;
+    case HID_KEY_PAGE_DOWN: marker = "<PAGEDOWN>"; break;
+    case HID_KEY_INSERT:    marker = "<INSERT>"; break;
+    case HID_KEY_DELETE:    marker = "<DEL>"; break;
+
+    // Function keys
+    case HID_KEY_F1:  marker = "<F1>"; break;
+    case HID_KEY_F2:  marker = "<F2>"; break;
+    case HID_KEY_F3:  marker = "<F3>"; break;
+    case HID_KEY_F4:  marker = "<F4>"; break;
+    case HID_KEY_F5:  marker = "<F5>"; break;
+    case HID_KEY_F6:  marker = "<F6>"; break;
+    case HID_KEY_F7:  marker = "<F7>"; break;
+    case HID_KEY_F8:  marker = "<F8>"; break;
+    case HID_KEY_F9:  marker = "<F9>"; break;
+    case HID_KEY_F10: marker = "<F10>"; break;
+    case HID_KEY_F11: marker = "<F11>"; break;
+    case HID_KEY_F12: marker = "<F12>"; break;
+
+    // Keypad (numpad) - these output the digit character, not special markers
+    // Only mark as special if numlock is off (navigation mode), but we can't easily detect that
+    // So we'll output the digit directly for keypad keys
+    case HID_KEY_KEYPAD_1: SerialTinyUSB.print("1"); return true;
+    case HID_KEY_KEYPAD_2: SerialTinyUSB.print("2"); return true;
+    case HID_KEY_KEYPAD_3: SerialTinyUSB.print("3"); return true;
+    case HID_KEY_KEYPAD_4: SerialTinyUSB.print("4"); return true;
+    case HID_KEY_KEYPAD_5: SerialTinyUSB.print("5"); return true;
+    case HID_KEY_KEYPAD_6: SerialTinyUSB.print("6"); return true;
+    case HID_KEY_KEYPAD_7: SerialTinyUSB.print("7"); return true;
+    case HID_KEY_KEYPAD_8: SerialTinyUSB.print("8"); return true;
+    case HID_KEY_KEYPAD_9: SerialTinyUSB.print("9"); return true;
+    case HID_KEY_KEYPAD_0: SerialTinyUSB.print("0"); return true;
+    case HID_KEY_KEYPAD_DECIMAL:  SerialTinyUSB.print("."); return true;
+    case HID_KEY_KEYPAD_DIVIDE:   SerialTinyUSB.print("/"); return true;
+    case HID_KEY_KEYPAD_MULTIPLY: SerialTinyUSB.print("*"); return true;
+    case HID_KEY_KEYPAD_SUBTRACT: SerialTinyUSB.print("-"); return true;
+    case HID_KEY_KEYPAD_ADD:      SerialTinyUSB.print("+"); return true;
+    case HID_KEY_KEYPAD_ENTER:    marker = "<ENTER>"; break;
+
+    // System keys
+    case HID_KEY_PRINT_SCREEN: marker = "<PRNT>"; break;
+    case HID_KEY_SCROLL_LOCK:  marker = "<SCRLL>"; break;
+    case HID_KEY_PAUSE:        marker = "<PAUSE>"; break;
+    case HID_KEY_NUM_LOCK:     marker = "<NUMLOCK>"; break;
+    case HID_KEY_CAPS_LOCK:    marker = "<CAPSLOCK>"; break;
+    case HID_KEY_ESCAPE:       marker = "<ESC>"; break;
+
+    // Modifier keys (when pressed alone)
+    case HID_KEY_CONTROL_LEFT:
+    case HID_KEY_CONTROL_RIGHT: marker = "<CTRL>"; break;
+    case HID_KEY_ALT_LEFT:
+    case HID_KEY_ALT_RIGHT:     marker = "<ALT>"; break;
+    case HID_KEY_GUI_LEFT:
+    case HID_KEY_GUI_RIGHT:     marker = "<WIN>"; break;
+    case HID_KEY_SHIFT_LEFT:
+    case HID_KEY_SHIFT_RIGHT:   marker = "<SHIFT>"; break;
+    case HID_KEY_APPLICATION:   marker = "<MENU>"; break;
+
+    // Space, Enter, Tab, Backspace
+    case HID_KEY_SPACE:     SerialTinyUSB.print(" "); return true;
+    case HID_KEY_ENTER:     marker = "<ENTER>"; break;
+    case HID_KEY_TAB:       marker = "<TAB>"; break;
+    case HID_KEY_BACKSPACE: marker = "<BACKSPACE>"; break;
+
+    default:
+      return false;  // Not a special key
+  }
+
+  if (marker) {
+    SerialTinyUSB.print(marker);
+    // Add newline after ENTER for readability
+    if (code == HID_KEY_ENTER || code == HID_KEY_KEYPAD_ENTER) {
+      SerialTinyUSB.print("\n");
+    }
+    return true;
+  }
+  return false;
 }
 
 static void process_mouse_report(hid_mouse_report_t const* report) {
@@ -1024,6 +1312,174 @@ void tuh_cdc_umount_cb(uint8_t idx) {
 
 // END of OTHER Host devices detector section
 
+//
+// Serial Command Processing
+//
+void process_serial_command(const char* cmd) {
+  // Convert to uppercase for comparison
+  char upper[SERIAL_BUFFER_SIZE];
+  for (int i = 0; cmd[i] && i < SERIAL_BUFFER_SIZE - 1; i++) {
+    upper[i] = toupper(cmd[i]);
+    upper[i + 1] = '\0';
+  }
+
+  if (strcmp(upper, "HELP") == 0 || strcmp(upper, "?") == 0) {
+    SerialTinyUSB.println("\r\n=== CERBERUS COMMANDS ===");
+    SerialTinyUSB.println("HELP     - Show this help");
+    SerialTinyUSB.println("STATUS   - Show current status");
+    SerialTinyUSB.println("LAST     - Show last device info (forensics)");
+    SerialTinyUSB.println("RESET    - Reset counters");
+    SerialTinyUSB.println("REBOOT   - Reboot device");
+    SerialTinyUSB.println("VERBOSE  - Toggle verbose mode");
+    SerialTinyUSB.println("HEXDUMP  - Toggle hexdump output");
+    SerialTinyUSB.println("HIDDEBUG - Toggle HID raw debug");
+    SerialTinyUSB.println("CLEAR    - Clear last device info");
+    SerialTinyUSB.println("=========================\r\n");
+  }
+  else if (strcmp(upper, "STATUS") == 0) {
+    print_status();
+  }
+  else if (strcmp(upper, "LAST") == 0) {
+    print_last_device();
+  }
+  else if (strcmp(upper, "RESET") == 0) {
+    hid_event_num = 0;
+    hid_window_count = 0;
+    hid_current_speed = 0;
+    hid_speed_alert = false;
+    hid_speed_reported = false;
+    written_reported = false;
+    deleted_reported = false;
+    hid_reported = false;
+    suspicious_reported = false;
+    SerialTinyUSB.println("[+] Counters reset");
+    showStatus("Reset OK", LOGO_USB_CONNECTED);
+  }
+  else if (strcmp(upper, "REBOOT") == 0) {
+    SerialTinyUSB.println("[+] Rebooting...");
+    showStatus("REBOOT", LOGO_USB_CONNECTED);
+    delay(500);
+    swreset();
+  }
+  else if (strcmp(upper, "VERBOSE") == 0) {
+    verbose_mode = !verbose_mode;
+    SerialTinyUSB.printf("[+] Verbose mode: %s\r\n", verbose_mode ? "ON" : "OFF");
+  }
+  else if (strcmp(upper, "HEXDUMP") == 0) {
+    show_hexdump = !show_hexdump;
+    SerialTinyUSB.printf("[+] Hexdump: %s\r\n", show_hexdump ? "ON" : "OFF");
+  }
+  else if (strcmp(upper, "HIDDEBUG") == 0) {
+    show_hid_debug = !show_hid_debug;
+    SerialTinyUSB.printf("[+] HID Debug: %s\r\n", show_hid_debug ? "ON" : "OFF");
+    if (show_hid_debug) {
+      SerialTinyUSB.println("    Format: [mod=XX key=YY] where mod is modifier byte");
+    }
+  }
+  else if (strcmp(upper, "CLEAR") == 0) {
+    memset(&last_device, 0, sizeof(last_device));
+    SerialTinyUSB.println("[+] Last device info cleared");
+  }
+  else if (strlen(upper) > 0) {
+    SerialTinyUSB.printf("[!] Unknown command: %s (type HELP)\r\n", cmd);
+  }
+}
+
+void print_status() {
+  SerialTinyUSB.println("\r\n=== CERBERUS STATUS ===");
+  SerialTinyUSB.printf("Version: %s\r\n", VERSION);
+  SerialTinyUSB.printf("Uptime: %lu ms\r\n", to_ms_since_boot(get_absolute_time()));
+  SerialTinyUSB.printf("HID Events: %u\r\n", hid_event_num);
+  SerialTinyUSB.printf("HID Speed: %.1f keys/sec\r\n", hid_current_speed);
+  SerialTinyUSB.printf("Speed Alert: %s\r\n", hid_speed_alert ? "YES" : "no");
+  SerialTinyUSB.printf("Verbose: %s\r\n", verbose_mode ? "ON" : "OFF");
+  SerialTinyUSB.printf("Hexdump: %s\r\n", show_hexdump ? "ON" : "OFF");
+
+  dev_info_t* dev = get_first_mounted_device();
+  if (dev != NULL) {
+    SerialTinyUSB.printf("Connected: VID=%04X PID=%04X\r\n",
+                         dev->desc_device.idVendor, dev->desc_device.idProduct);
+  } else {
+    SerialTinyUSB.println("Connected: none");
+  }
+  SerialTinyUSB.println("=======================\r\n");
+}
+
+void print_last_device() {
+  SerialTinyUSB.println("\r\n=== LAST DEVICE (FORENSICS) ===");
+  if (last_device.vid == 0 && last_device.pid == 0) {
+    SerialTinyUSB.println("No device recorded");
+  } else {
+    SerialTinyUSB.printf("VID:PID      : %04X:%04X\r\n", last_device.vid, last_device.pid);
+    SerialTinyUSB.printf("Class        : %u/%u\r\n", last_device.device_class, last_device.device_subclass);
+    SerialTinyUSB.printf("Manufacturer : %s\r\n", last_device.manufacturer);
+    SerialTinyUSB.printf("Product      : %s\r\n", last_device.product);
+    SerialTinyUSB.printf("Serial       : %s\r\n", last_device.serial);
+    SerialTinyUSB.printf("HID Events   : %u\r\n", last_device.hid_events);
+    SerialTinyUSB.printf("Max Speed    : %.1f keys/sec\r\n", last_device.max_hid_speed);
+    SerialTinyUSB.printf("Suspicious   : %s\r\n", last_device.was_suspicious ? "YES" : "no");
+    if (last_device.was_suspicious) {
+      SerialTinyUSB.printf("Reason       : %s\r\n", last_device.suspicious_reason);
+    }
+    SerialTinyUSB.printf("Timestamp    : %lu ms after boot\r\n", last_device.timestamp);
+  }
+  SerialTinyUSB.println("===============================\r\n");
+}
+
+void save_device_info(dev_info_t* dev, tusb_desc_device_t* desc) {
+  last_device.vid = desc->idVendor;
+  last_device.pid = desc->idProduct;
+  last_device.device_class = desc->bDeviceClass;
+  last_device.device_subclass = desc->bDeviceSubClass;
+  strncpy(last_device.manufacturer, (char*)dev->manufacturer, sizeof(last_device.manufacturer) - 1);
+  strncpy(last_device.product, (char*)dev->product, sizeof(last_device.product) - 1);
+  strncpy(last_device.serial, (char*)dev->serial, sizeof(last_device.serial) - 1);
+  last_device.timestamp = to_ms_since_boot(get_absolute_time());
+  last_device.hid_events = 0;
+  last_device.max_hid_speed = 0;
+  last_device.was_suspicious = false;
+  last_device.suspicious_reason[0] = '\0';
+}
+
+void update_hid_speed() {
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+
+  // Reset window if expired
+  if (now - hid_window_start > HID_SPEED_WINDOW_MS) {
+    // Calculate speed from last window
+    if (hid_window_count > 0) {
+      hid_current_speed = (float)hid_window_count * 1000.0f / (float)HID_SPEED_WINDOW_MS;
+
+      // Check for automated typing
+      if (hid_current_speed > HID_SPEED_THRESHOLD && !hid_speed_alert) {
+        hid_speed_alert = true;
+        hid_speed_reported = false;
+      }
+    }
+    hid_window_start = now;
+    hid_window_count = 0;
+  }
+
+  hid_window_count++;
+}
+
+//
+// Suspicious device detection
+//
+const char* check_suspicious_device(uint16_t vid, uint16_t pid) {
+  for (size_t i = 0; i < SUSPICIOUS_COUNT; i++) {
+    // RP2040 has memory-mapped flash, direct access works
+    const suspicious_device_t* dev = &SUSPICIOUS_DEVICES[i];
+
+    if (dev->vid == vid) {
+      // If PID is 0x0000, match any PID for this VID
+      if (dev->pid == 0x0000 || dev->pid == pid) {
+        return dev->name;
+      }
+    }
+  }
+  return NULL;
+}
 
 // GUI renderer: draws a static frame plus the selected icon and status text.
 void draw(const char* text, uint8_t logoIndex) {
