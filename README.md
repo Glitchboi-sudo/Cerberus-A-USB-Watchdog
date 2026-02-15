@@ -23,6 +23,7 @@ Enfocado a expertos en ciberseguridad (SOC, blue teamers y red teamers). Cerberu
 ## Instalación
 
 ### Prerequisitos
+
 - Instalar ArduinoIDE
 - `Adafruit TinyUSB Library` version `>=3.6.0`
 - `Pico-PIO-USB` version `>=0.7.2`
@@ -32,12 +33,15 @@ Enfocado a expertos en ciberseguridad (SOC, blue teamers y red teamers). Cerberu
 - Pantalla I2C OLED de 128x64 o 128x32 (SSD1306)
 
 ### Pasos
+
 ---
+
 #### Usando la version precompilada
 
 Dentro del github ve a releases y busca el archivo .uf2 mas reciente, descargalo
 
 Para flashear la imagen debes:
+
 - Conecta la Raspberry Pi Pico con un cable USB, manten el boton _BOOTSEL/BOOT_ presionado.
 - Suelta el boton.
 - Veremos un nuevo dispositivo en el sistema, llamado `RPI-RP2` (En linux probablemente tendras que hacerlo manualmente).
@@ -47,13 +51,15 @@ Para flashear la imagen debes:
 #### Compila tu version
 
 Obten el repo de forma local
-``` bash
+
+```bash
 git clone https://github.com/Glitchboi-sudo/Cerberus-A-USB-Watchdog.git
 ```
 
 Con Arduino IDE
+
 - Abre `Software/Cerberus/Cerberus.ino`.
-- Conecta  la Raspberry Pi Pico con un cable USB
+- Conecta la Raspberry Pi Pico con un cable USB
 - Selecciona la Pico en Arduino
 - Tools -> USBStack -> Adafruit TinyUSB
 - Click en `Upload`
@@ -82,6 +88,35 @@ Con Arduino IDE
 - Disclaimer: la version actual esta mal hecha; funciona pero las conexiones estan invertidas. Se arreglara mas adelante.
 
 ---
+
+## Arquitectura del Software
+
+### Firmware (Cerberus.ino)
+
+El firmware utiliza ambos cores del RP2040:
+
+- **Core 0**: Maneja la interfaz de usuario (OLED, LED NeoPixel, botones) y emula un dispositivo de almacenamiento USB para detectar actividad sospechosa del host.
+- **Core 1**: Ejecuta el stack USB Host via PIO para monitorear dispositivos conectados (HID, Mass Storage, CDC).
+
+**Modulos principales:**
+
+- **Deteccion de amenazas**: USB Killer (via interrupcion hardware), dispositivos sospechosos (base de datos VID/PID), y escritura automatizada BadUSB (analisis de velocidad HID).
+- **Emulacion MSC**: Disco RAM virtual que detecta lecturas de README/AUTORUN y escrituras maliciosas.
+- **Procesamiento HID**: Decodificacion de reportes de teclado/mouse con soporte para modificadores y teclas especiales.
+- **Interfaz OLED**: GUI con iconos, estados y vista de descriptores USB.
+- **Comandos serial**: Interface de texto para debugging y forense (HELP, STATUS, LAST, HEXDUMP, etc.).
+
+### Companion App (cerberus_listener.py)
+
+Aplicacion GUI en Python/Tkinter para monitoreo en tiempo real:
+
+- **Conexion serial**: Auto-deteccion del dispositivo, reconexion automatica.
+- **Log con filtros**: Colores por severidad, busqueda, filtrado por categoria.
+- **Analizador de payloads**: Detecta patrones de ataque (GUI+R, powershell, etc.) y calcula velocidad de tecleo.
+- **Modo Red Team**: Exportacion de keystrokes capturados a DuckyScript, comandos rapidos, filtro para bug CTRL del Flipper Zero.
+
+---
+
 ## TODO
 
 - [ ] Documentar el cableado exacto.
@@ -89,23 +124,21 @@ Con Arduino IDE
 - [ ] Publicar binarios `.uf2` en Releases para OLED 128x64 y 128x32.
 - [ ] Mejorar soporte/auto‑deteccion de pantallas OLED 128x32/64.
 - [ ] Guia del circuito para deteccion USB Killer en `KILLER_PIN`.
-- [ ] Anadir hardware externo para almacenar el RAM Disk en lugar de la flash interna del RP2040.
-- [ ] Funciones para detectar/identificar el dispositivo conectado (clase, VID/PID, fabricante) y heuristicas de posible ataque.
-- [ ] Interfaz por CLI mas amigable para configuracion/inspeccion (filtros, niveles de log, export de evidencias).
 
 ---
 
 ## Contribuir
 
 Este proyecto no solo es un repositorio: es un espacio abierto para aprender, experimentar y construir juntos. **Buscamos activamente contribuciones**, ya sea en la parte técnica o incluso en la documentación.
-- **En hardware:** Si detectas oportunidades para mejorar la eficiencia (por ejemplo, usando otros chips, optimizando el consumo de energía o cambiando componentes por alternativas más confiables), ¡tus sugerencias son bienvenidas!    
+
+- **En hardware:** Si detectas oportunidades para mejorar la eficiencia (por ejemplo, usando otros chips, optimizando el consumo de energía o cambiando componentes por alternativas más confiables), ¡tus sugerencias son bienvenidas!
 - **En software:** Desde corrección de bugs, optimización de rendimiento, hasta mejoras en la legibilidad del código o documentación; todo aporte, grande o pequeño, suma muchísimo.
-No necesitas ser experto para ayudar: si crees que algo puede explicarse mejor, que el código puede ser más claro, o que hay una forma más elegante de hacer algo, **cuéntanos o abre un Pull Request**.
+  No necesitas ser experto para ayudar: si crees que algo puede explicarse mejor, que el código puede ser más claro, o que hay una forma más elegante de hacer algo, **cuéntanos o abre un Pull Request**.
 
 ---
 
 ## Créditos
 
-- Proyecto basado en [USBvalve](https://github.com/cecio/USBvalve) hecho por *[Cecio](https://github.com/cecio)* 
+- Proyecto basado en [USBvalve](https://github.com/cecio/USBvalve) hecho por _[Cecio](https://github.com/cecio)_
 - Modificado / Creado por:
   - [Erik Alcantara](https://www.linkedin.com/in/erik-alc%C3%A1ntara-covarrubias-29a97628a/)
