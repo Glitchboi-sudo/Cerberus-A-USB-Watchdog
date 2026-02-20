@@ -90,43 +90,6 @@ ATTACK_PATTERNS = [
     (r"(schtasks|reg add)", "Persistence", "danger"),
 ]
 
-# DuckyScript key mappings (Cerberus firmware -> DuckyScript)
-DUCKY_MAP = {
-    # Arrow keys
-    "<ARROWRIGHT>": "RIGHT", "<ARROWLEFT>": "LEFT",
-    "<ARROWDOWN>": "DOWN", "<ARROWUP>": "UP",
-    # Navigation
-    "<HOME>": "HOME", "<END>": "END",
-    "<PAGEUP>": "PAGEUP", "<PAGEDOWN>": "PAGEDOWN",
-    "<DEL>": "DELETE", "<DELETE>": "DELETE",
-    "<INSERT>": "INSERT",
-    # Function keys
-    "<F1>": "F1", "<F2>": "F2", "<F3>": "F3", "<F4>": "F4",
-    "<F5>": "F5", "<F6>": "F6", "<F7>": "F7", "<F8>": "F8",
-    "<F9>": "F9", "<F10>": "F10", "<F11>": "F11", "<F12>": "F12",
-    # Special
-    "<PAUSE>": "PAUSE", "<PRNT>": "PRINTSCREEN",
-    "<SCRLL>": "SCROLLLOCK",
-    "<ENTER>": "ENTER",
-    "<TAB>": "TAB",
-    "<ESCAPE>": "ESCAPE", "<ESC>": "ESCAPE",
-    "<SPACE>": "SPACE",
-    "<BACKSPACE>": "BACKSPACE",
-    # Modifier keys (when pressed alone)
-    "<CTRL>": "CTRL", "<ALT>": "ALT", "<WIN>": "GUI",
-    "<FN>": "FN",
-    # Keypad
-    "<KEYPAD_0>": "NUMPAD0", "<KEYPAD_1>": "NUMPAD1",
-    "<KEYPAD_2>": "NUMPAD2", "<KEYPAD_3>": "NUMPAD3",
-    "<KEYPAD_4>": "NUMPAD4", "<KEYPAD_5>": "NUMPAD5",
-    "<KEYPAD_6>": "NUMPAD6", "<KEYPAD_7>": "NUMPAD7",
-    "<KEYPAD_8>": "NUMPAD8", "<KEYPAD_9>": "NUMPAD9",
-    "<KEYPAD_DIV>": "NUMPAD/", "<KEYPAD_MUL>": "NUMPAD*",
-    "<KEYPAD_SUB>": "NUMPAD-", "<KEYPAD_ADD>": "NUMPAD+",
-    "<KEYPAD_DECIMAL>": "NUMPAD.",
-    # ASCII control characters
-    "\r": "ENTER", "\n": "ENTER", "\t": "TAB",
-}
 
 FILTER_OPTIONS = [
     ("All", None),
@@ -277,7 +240,6 @@ class PayloadAnalyzer:
         r'idVendor',
         r'idProduct',
         r'iManufacturer',
-        r'iProduct',
         r'iSerialNumber',
         # Mass storage
         r'Mass\s+Device',
@@ -454,108 +416,6 @@ class PayloadAnalyzer:
         buf = self.keystroke_buffer[-max_chars:] if len(self.keystroke_buffer) > max_chars else self.keystroke_buffer
         return buf.replace('\r', '↵').replace('\n', '↵').replace('\t', '→')
 
-    def export_duckyscript(self):
-        """Export captured payload as valid DuckyScript."""
-        if not self.raw_events:
-            return "REM No keystrokes captured"
-
-        lines = []
-        lines.append("REM Captured by Cerberus USB Watchdog")
-        lines.append(f"REM Timestamp: {datetime.now().isoformat()}")
-        lines.append(f"REM Total events: {len(self.raw_events)}")
-        lines.append("")
-
-        current_string = ""
-        last_time = None
-
-        for evt in self.raw_events:
-            mods = evt["mods"]
-            key = evt["key"]
-            special = evt["special"]
-            timestamp = evt["time"]
-
-            # Add delay if significant gap (>100ms)
-            if last_time and (timestamp - last_time) > 0.1:
-                if current_string:
-                    lines.append(f"STRING {current_string}")
-                    current_string = ""
-                delay_ms = int((timestamp - last_time) * 1000)
-                if delay_ms > 50:  # Only add meaningful delays
-                    lines.append(f"DELAY {delay_ms}")
-            last_time = timestamp
-
-            # Handle modifier combinations (GUI+r, CTRL+c, etc.)
-            if mods:
-                if current_string:
-                    lines.append(f"STRING {current_string}")
-                    current_string = ""
-
-                # Build DuckyScript modifier command
-                # DuckyScript format: GUI r, CTRL ALT DELETE, etc.
-                ducky_mods = []
-                if "GUI" in mods: ducky_mods.append("GUI")
-                if "CTRL" in mods: ducky_mods.append("CTRL")
-                if "ALT" in mods: ducky_mods.append("ALT")
-
-                # Get the actual key
-                if special:
-                    ducky_key = DUCKY_MAP.get(f"<{special}>", special)
-                elif key.startswith("<") and key.endswith(">"):
-                    ducky_key = DUCKY_MAP.get(key.upper(), key[1:-1])
-                else:
-                    ducky_key = key.lower()  # DuckyScript uses lowercase for letters
-
-                # Combine: "GUI r" or "CTRL ALT DELETE"
-                cmd = " ".join(ducky_mods + [ducky_key])
-                lines.append(cmd)
-
-            # Handle special keys without modifiers (<ENTER>, <F1>, etc.)
-            elif special:
-                if current_string:
-                    lines.append(f"STRING {current_string}")
-                    current_string = ""
-                ducky_key = DUCKY_MAP.get(f"<{special}>", special)
-                lines.append(ducky_key)
-
-            # Handle special key notation in key field
-            elif key.startswith("<") and key.endswith(">"):
-                if current_string:
-                    lines.append(f"STRING {current_string}")
-                    current_string = ""
-                ducky_key = DUCKY_MAP.get(key.upper(), key[1:-1])
-                lines.append(ducky_key)
-
-            # Handle regular characters
-            else:
-                # Check if it's a special char that needs its own command
-                if key in DUCKY_MAP:
-                    if current_string:
-                        lines.append(f"STRING {current_string}")
-                        current_string = ""
-                    lines.append(DUCKY_MAP[key])
-                elif key.isprintable() and len(key) == 1:
-                    current_string += key
-
-        # Flush remaining string
-        if current_string:
-            lines.append(f"STRING {current_string}")
-
-        # Clean up: remove empty lines and merge consecutive DELAYs
-        cleaned = []
-        for line in lines:
-            if line.strip():
-                # Merge consecutive DELAYs
-                if line.startswith("DELAY ") and cleaned and cleaned[-1].startswith("DELAY "):
-                    try:
-                        prev_delay = int(cleaned[-1].split()[1])
-                        curr_delay = int(line.split()[1])
-                        cleaned[-1] = f"DELAY {prev_delay + curr_delay}"
-                    except (ValueError, IndexError):
-                        cleaned.append(line)
-                else:
-                    cleaned.append(line)
-
-        return "\n".join(cleaned)
 
 
 # ============================================================================
@@ -613,7 +473,6 @@ class CerberusApp(tk.Tk):
         self.auto_reconnect = tk.BooleanVar(value=True)
         self.show_timestamps = tk.BooleanVar(value=True)
         self.redteam_mode = tk.BooleanVar(value=False)
-        self.filter_ctrl_bug = tk.BooleanVar(value=False)  # Filter Flipper CTRL bug
         self.port_var = tk.StringVar()
         self.search_var = tk.StringVar()
         self.filter_var = tk.StringVar(value="All")
@@ -622,6 +481,8 @@ class CerberusApp(tk.Tk):
         self.line_count = 0
         self.alert_count = 0
         self.analyzer = PayloadAnalyzer()
+        self.device_info = {}
+        self.raw_descriptor_lines = []
 
         self._build_header()
         self._build_toolbar()
@@ -774,14 +635,6 @@ class CerberusApp(tk.Tk):
                                       bg=COLORS["bg_input"], fg=COLORS["success"])
         self.alerts_label.pack(anchor="w")
 
-        # Flipper CTRL bug workaround
-        ctrl_frame = tk.Frame(pay_i, bg=COLORS["bg_panel"])
-        ctrl_frame.pack(fill="x", padx=10, pady=(5, 0))
-        tk.Checkbutton(ctrl_frame, text="Filter CTRL bug (Flipper)", variable=self.filter_ctrl_bug,
-                       font=("Segoe UI", 8), bg=COLORS["bg_panel"], fg=COLORS["warning"],
-                       selectcolor=COLORS["bg_input"], activebackground=COLORS["bg_panel"],
-                       command=self._on_ctrl_filter_change).pack(anchor="w")
-
         # Quick Commands (available in normal mode for analysis/debugging)
         qc_normal = tk.LabelFrame(pay_i, text="Quick Commands", font=("Segoe UI", 9),
                                    bg=COLORS["bg_panel"], fg=COLORS["fg_dim"])
@@ -863,30 +716,69 @@ class CerberusApp(tk.Tk):
         qc.grid_columnconfigure(1, weight=1)
         qc.grid_columnconfigure(2, weight=1)
 
-        # Flipper CTRL bug filter (also available in Red Team mode)
-        ctrl_rt_frame = tk.Frame(right_i, bg=COLORS["bg_redteam"])
-        ctrl_rt_frame.pack(fill="x", padx=10, pady=(10, 0))
-        tk.Checkbutton(ctrl_rt_frame, text="Filter CTRL bug (Flipper)", variable=self.filter_ctrl_bug,
-                       font=("Segoe UI", 8), bg=COLORS["bg_redteam"], fg=COLORS["warning"],
-                       selectcolor=COLORS["bg_input"], activebackground=COLORS["bg_redteam"],
-                       command=self._on_ctrl_filter_change).pack(anchor="w")
+        # Device Descriptor panel
+        desc_header = tk.Frame(right_i, bg=COLORS["bg_redteam"])
+        desc_header.pack(fill="x", padx=10, pady=(10, 5))
+        tk.Label(desc_header, text="DEVICE DESCRIPTOR", font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["bg_redteam"], fg=COLORS["redteam"]).pack(side="left")
+        ModernButton(desc_header, text="Clear", command=self._clear_device_info,
+                     style="secondary").pack(side="right")
 
-        # DuckyScript output
-        tk.Label(right_i, text="DuckyScript Export:", font=("Segoe UI", 9),
-                 bg=COLORS["bg_redteam"], fg=COLORS["fg_dim"]).pack(anchor="w", padx=10, pady=(10, 2))
+        # Info grid
+        info_frame = tk.Frame(right_i, bg=COLORS["bg_input"], padx=10, pady=8)
+        info_frame.pack(fill="x", padx=10, pady=(0, 5))
 
-        self.ducky_text = tk.Text(right_i, height=12, wrap="word", font=("Cascadia Code", 9),
-                                   bg=COLORS["bg_input"], fg=COLORS["warning"], relief="flat", padx=8, pady=6)
-        self.ducky_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.ducky_text.config(state="disabled")
+        def desc_pair(parent, label, row, col):
+            """Two-column info cell: label + value."""
+            tk.Label(parent, text=label, font=("Segoe UI", 8),
+                     bg=COLORS["bg_input"], fg=COLORS["fg_dim"],
+                     anchor="w").grid(row=row, column=col * 2, sticky="w", padx=(0, 4), pady=2)
+            val = tk.Label(parent, text="\u2014", font=("Cascadia Code", 9, "bold"),
+                           bg=COLORS["bg_input"], fg=COLORS["warning"], anchor="w")
+            val.grid(row=row, column=col * 2 + 1, sticky="ew", padx=(0, 12), pady=2)
+            return val
 
-        # Export buttons
-        exp = tk.Frame(right_i, bg=COLORS["bg_redteam"])
-        exp.pack(fill="x", padx=10, pady=(0, 10))
+        def desc_full(parent, label, row):
+            """Full-width info row spanning both value columns."""
+            tk.Label(parent, text=label, font=("Segoe UI", 8),
+                     bg=COLORS["bg_input"], fg=COLORS["fg_dim"],
+                     anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 4), pady=2)
+            val = tk.Label(parent, text="\u2014", font=("Cascadia Code", 9, "bold"),
+                           bg=COLORS["bg_input"], fg=COLORS["warning"], anchor="w")
+            val.grid(row=row, column=1, columnspan=3, sticky="ew", pady=2)
+            return val
 
-        ModernButton(exp, text="Refresh DuckyScript", command=self._refresh_ducky, style="redteam").pack(side="left")
-        ModernButton(exp, text="Export .txt", command=self._export_ducky, style="secondary").pack(side="left", padx=5)
-        ModernButton(exp, text="Copy", command=self._copy_ducky, style="secondary").pack(side="left")
+        self.desc_vid_val      = desc_pair(info_frame, "VID:",          0, 0)
+        self.desc_pid_val      = desc_pair(info_frame, "PID:",          0, 1)
+        self.desc_usb_val      = desc_pair(info_frame, "USB Ver:",      1, 0)
+        self.desc_class_val    = desc_pair(info_frame, "Class:",        1, 1)
+        self.desc_mfg_val      = desc_full(info_frame, "Manufacturer:", 2)
+        self.desc_prod_val     = desc_full(info_frame, "Product:",      3)
+        self.desc_serial_val   = desc_full(info_frame, "Serial:",       4)
+        self.desc_subclass_val = desc_pair(info_frame, "SubClass:",     5, 0)
+        self.desc_proto_val    = desc_pair(info_frame, "Protocol:",     5, 1)
+        self.desc_maxpkt_val   = desc_pair(info_frame, "MaxPacket:",    6, 0)
+        self.desc_numcfg_val   = desc_pair(info_frame, "NumConfigs:",   6, 1)
+
+        info_frame.grid_columnconfigure(1, weight=1)
+        info_frame.grid_columnconfigure(3, weight=1)
+
+        # Raw descriptor output
+        tk.Label(right_i, text="Raw Descriptor:", font=("Segoe UI", 9),
+                 bg=COLORS["bg_redteam"], fg=COLORS["fg_dim"]).pack(anchor="w", padx=10, pady=(5, 2))
+
+        raw_frame = tk.Frame(right_i, bg=COLORS["bg_input"])
+        raw_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.desc_raw = tk.Text(raw_frame, wrap="none", font=("Cascadia Code", 8),
+                                bg=COLORS["bg_input"], fg=COLORS["fg_normal"],
+                                relief="flat", padx=6, pady=4, state="disabled")
+        raw_scroll_y = tk.Scrollbar(raw_frame, command=self.desc_raw.yview)
+        raw_scroll_x = tk.Scrollbar(raw_frame, orient="horizontal", command=self.desc_raw.xview)
+        self.desc_raw.configure(yscrollcommand=raw_scroll_y.set, xscrollcommand=raw_scroll_x.set)
+        raw_scroll_y.pack(side="right", fill="y")
+        raw_scroll_x.pack(side="bottom", fill="x")
+        self.desc_raw.pack(side="left", fill="both", expand=True)
 
         paned.add(right, minsize=320)
 
@@ -949,29 +841,182 @@ class CerberusApp(tk.Tk):
         else:
             self._log("[!] Not connected\n", COLORS["warning"])
 
-    def _refresh_ducky(self):
-        script = self.analyzer.export_duckyscript()
-        self.ducky_text.config(state="normal")
-        self.ducky_text.delete("1.0", "end")
-        self.ducky_text.insert("1.0", script)
-        self.ducky_text.config(state="disabled")
+    # ---- Device Descriptor helpers ----
 
-    def _export_ducky(self):
-        script = self.analyzer.export_duckyscript()
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("DuckyScript", "*.txt"), ("All", "*.*")],
-            initialfile=f"payload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        )
-        if filename:
-            with open(filename, "w") as f:
-                f.write(script)
-            self._log_rt(f"Exported to {filename}\n", COLORS["success"])
+    # Patterns that identify lines as USB descriptor output from the firmware.
+    # Actual firmware format (NO "=" separator for most fields, just whitespace):
+    #   "Device 1: ID 046d:c529"
+    #   "  bcdUSB              0200"
+    #   "  idVendor            0x046d"
+    #   "  iManufacturer       1\r --- Logitech"
+    #   "VID = 046d, PID = c529"
+    _DESC_PATTERNS = [
+        r'Device\s+\d+:\s+ID\s+[0-9a-fA-F]',   # "Device 1: ID 046d:c529"
+        r'Device\s+Descriptor',
+        r'bLength', r'bDescriptorType', r'bcdUSB', r'bcdDevice',
+        r'bDeviceClass', r'bDeviceSubClass', r'bDeviceProtocol', r'bMaxPacketSize',
+        r'bNumConfig', r'idVendor', r'iProduct',
+        r'iManufacturer', r'iSerialNumber',
+        r'VID\s*=', r'PID\s*=',
+    ]
 
-    def _copy_ducky(self):
-        self.clipboard_clear()
-        self.clipboard_append(self.analyzer.export_duckyscript())
-        self._log_rt("DuckyScript copied to clipboard\n", COLORS["success"])
+    def _update_device_info(self, line):
+        """Parse a serial line for USB descriptor data and refresh the panel.
+
+        Firmware output formats (whitespace-only separator, no '=' for most fields):
+          "Device 1: ID 046d:c529"
+          "  bcdUSB              0200"        (bare 4-hex-digit, no 0x)
+          "  idVendor            0x046d"      (with 0x prefix)
+          "  iManufacturer       1\\r --- Logitech"  (\\r then ' --- String')
+          "VID = 046d, PID = c529"            (= with bare hex, no 0x)
+        """
+        text = line.strip()
+
+        # Reset on device attach
+        if re.search(r'Device\s+attached', text, re.IGNORECASE):
+            self.device_info.clear()
+            self.raw_descriptor_lines.clear()
+            self._refresh_device_info()
+            if hasattr(self, 'desc_raw'):
+                self.desc_raw.configure(state="normal")
+                self.desc_raw.delete("1.0", "end")
+                self.desc_raw.configure(state="disabled")
+            return
+
+        # Only process lines that look like descriptor data
+        is_desc = any(re.search(p, text, re.IGNORECASE) for p in self._DESC_PATTERNS)
+        if not is_desc:
+            return
+
+        updated = False
+
+        def _grab(pattern):
+            m = re.search(pattern, text, re.IGNORECASE)
+            return m.group(1) if m else None
+
+        # ---- "Device 1: ID 046d:c529" (header line) ----
+        m = re.search(r'Device\s+\d+:\s+ID\s+([0-9a-fA-F]{4}):([0-9a-fA-F]{4})',
+                      text, re.IGNORECASE)
+        if m:
+            self.device_info['vid'] = '0x' + m.group(1).lower()
+            self.device_info['pid'] = '0x' + m.group(2).lower()
+            updated = True
+
+        # ---- "VID = 046d, PID = c529"  (no 0x prefix) ----
+        m = re.search(r'\bVID\s*=\s*([0-9a-fA-F]+)', text, re.IGNORECASE)
+        if m:
+            self.device_info['vid'] = '0x' + m.group(1).lower(); updated = True
+        m = re.search(r'\bPID\s*=\s*([0-9a-fA-F]+)', text, re.IGNORECASE)
+        if m:
+            self.device_info['pid'] = '0x' + m.group(1).lower(); updated = True
+
+        # ---- "  idVendor            0x046d"  (0x prefix present) ----
+        val = _grab(r'idVendor\s+(0x[0-9a-fA-F]+|[0-9a-fA-F]+)')
+        if val:
+            if not val.lower().startswith('0x'): val = '0x' + val
+            self.device_info['vid'] = val.lower(); updated = True
+
+        # ---- "  idProduct           0xc529" ----
+        val = _grab(r'idProduct\s+(0x[0-9a-fA-F]+|[0-9a-fA-F]+)')
+        if val:
+            if not val.lower().startswith('0x'): val = '0x' + val
+            self.device_info['pid'] = val.lower(); updated = True
+
+        # ---- "  iManufacturer       1\r --- Logitech"
+        # (\r is whitespace for \s; '.' matches \r but not \n) ----
+        val = _grab(r'iManufacturer\s+\d+\s+---\s+(.+)')
+        if val:
+            self.device_info['manufacturer'] = val.strip('\r \t'); updated = True
+
+        # ---- "  iProduct            1\r --- Product Name" ----
+        # Note: must NOT match 'idProduct' - anchor with word boundary
+        val = _grab(r'\biProduct\s+\d+\s+---\s+(.+)')
+        if val:
+            self.device_info['product'] = val.strip('\r \t'); updated = True
+
+        # ---- "  iSerialNumber       1\r --- SN123" ----
+        val = _grab(r'iSerialNumber\s+\d+\s+---\s+(.+)')
+        if val:
+            self.device_info['serial'] = val.strip('\r \t'); updated = True
+
+        # ---- "  bcdUSB              0200"  (4 bare hex digits, no 0x) ----
+        val = _grab(r'bcdUSB\s+([0-9a-fA-F]{4})\b')
+        if val:
+            try:
+                bcd = int(val, 16)
+                val = f"{(bcd >> 8) & 0xFF}.{bcd & 0xFF:02d}"
+            except ValueError:
+                pass
+            self.device_info['bcd_usb'] = val; updated = True
+
+        # ---- "  bcdDevice           0100" ----
+        val = _grab(r'bcdDevice\s+([0-9a-fA-F]{4})\b')
+        if val:
+            self.device_info['bcd_device'] = val; updated = True
+
+        # ---- "  bDeviceClass        0" ----
+        val = _grab(r'bDeviceClass\s+(\d+)')
+        if val:
+            self.device_info['class'] = val; updated = True
+
+        # ---- "  bDeviceSubClass     0" ----
+        val = _grab(r'bDeviceSubClass\s+(\d+)')
+        if val:
+            self.device_info['subclass'] = val; updated = True
+
+        # ---- "  bDeviceProtocol     0" ----
+        val = _grab(r'bDeviceProtocol\s+(\d+)')
+        if val:
+            self.device_info['protocol'] = val; updated = True
+
+        # ---- "  bMaxPacketSize0     8" ----
+        val = _grab(r'bMaxPacketSize\w*\s+(\d+)')
+        if val:
+            self.device_info['max_packet'] = val; updated = True
+
+        # ---- "  bNumConfigurations  1" ----
+        val = _grab(r'bNumConfigurations\s+(\d+)')
+        if val:
+            self.device_info['num_configs'] = val; updated = True
+
+        # Append to raw descriptor text widget
+        self.raw_descriptor_lines.append(line)
+        if hasattr(self, 'desc_raw'):
+            self.desc_raw.configure(state="normal")
+            self.desc_raw.insert("end", line + "\n")
+            self.desc_raw.see("end")
+            self.desc_raw.configure(state="disabled")
+
+        if updated:
+            self._refresh_device_info()
+
+    def _refresh_device_info(self):
+        """Update all device descriptor UI labels from self.device_info."""
+        if not hasattr(self, 'desc_vid_val'):
+            return
+        d = self.device_info
+        em = "\u2014"
+        self.desc_vid_val.config(text=d.get('vid', em))
+        self.desc_pid_val.config(text=d.get('pid', em))
+        self.desc_usb_val.config(text=d.get('bcd_usb', em))
+        self.desc_class_val.config(text=d.get('class', em))
+        self.desc_mfg_val.config(text=d.get('manufacturer', em))
+        self.desc_prod_val.config(text=d.get('product', em))
+        self.desc_serial_val.config(text=d.get('serial', em))
+        self.desc_subclass_val.config(text=d.get('subclass', em))
+        self.desc_proto_val.config(text=d.get('protocol', em))
+        self.desc_maxpkt_val.config(text=d.get('max_packet', em))
+        self.desc_numcfg_val.config(text=d.get('num_configs', em))
+
+    def _clear_device_info(self):
+        """Clear stored device descriptor data and reset the panel."""
+        self.device_info.clear()
+        self.raw_descriptor_lines.clear()
+        self._refresh_device_info()
+        if hasattr(self, 'desc_raw'):
+            self.desc_raw.configure(state="normal")
+            self.desc_raw.delete("1.0", "end")
+            self.desc_raw.configure(state="disabled")
 
     def _log_rt(self, msg, color=None):
         """Log to red team console."""
@@ -992,8 +1037,6 @@ class CerberusApp(tk.Tk):
         self.auto_indicator.config(text="")
         self.events_label.config(text="0", fg=COLORS["accent"])
         self.alerts_label.config(text="0", fg=COLORS["success"])
-        if self.redteam_mode.get():
-            self._refresh_ducky()
 
     def _update_payload_display(self):
         # Update events count
@@ -1022,122 +1065,13 @@ class CerberusApp(tk.Tk):
         else:
             self.alerts_label.config(fg=COLORS["success"])
 
-        if self.redteam_mode.get():
-            self._refresh_ducky()
-
     def _check_patterns(self, line):
-        # Apply CTRL bug filter before analysis so DuckyScript export is also clean
-        filtered_line = self._filter_ctrl_bug_text(line)
-        self.analyzer.add_line(filtered_line)
+        self.analyzer.add_line(line)
         new = self.analyzer.check_patterns()
         for name, sev in new:
             self._log(f"[ALERT] {name}\n", COLORS[sev])
         if new or "HID" in line.upper() or "GUI+" in line or "ALT+" in line or "CTRL+" in line:
             self._update_payload_display()
-
-    def _filter_ctrl_bug_text(self, text, force=False):
-        """Remove spurious CTRL+ prefixes from Flipper Zero bug.
-
-        The Flipper bug sends CTRL modifier with every keystroke, creating patterns like:
-        CTRL+pCTRL+oCTRL+wCTRL+eCTRL+r... instead of just "power..."
-
-        It also affects lines with spaces: CTRL+a CTRL+b CTRL+c (each key has CTRL)
-
-        Strategy:
-        - If a line has 3+ occurrences of CTRL+, treat entire line as buggy
-        - Strip ALL CTRL+ from such lines (except preserve line-initial CTRL+<single-letter>
-          which might be a real shortcut like CTRL+r)
-
-        Args:
-            text: Input text to filter
-            force: If True, apply filter regardless of toggle state
-        """
-        if not force and not self.filter_ctrl_bug.get():
-            return text
-        import re
-
-        def filter_line(line):
-            """Filter a single line for CTRL bug."""
-            # Count CTRL+ occurrences in this line
-            ctrl_count = len(re.findall(r'CTRL\+', line, re.IGNORECASE))
-
-            if ctrl_count == 0:
-                return line
-
-            # If only 1-2 CTRL+ and they're at the start, might be legitimate shortcuts
-            if ctrl_count <= 2:
-                # Check if it looks like a legitimate shortcut at start (e.g., "CTRL+r" alone)
-                if re.match(r'^(CTRL\+[a-zA-Z]\s*)+$', line.strip(), re.IGNORECASE):
-                    return line  # Keep as-is, looks like real shortcuts
-
-                # Check for consecutive CTRL+ (definitely bug)
-                if re.search(r'CTRL\+[^\s]CTRL\+', line, re.IGNORECASE):
-                    pass  # Fall through to aggressive filtering
-                else:
-                    return line  # Probably legitimate
-
-            # 3+ CTRL+ occurrences OR consecutive pattern = definitely Flipper bug
-            # Strip ALL CTRL+ but try to preserve initial shortcut
-
-            # Check if line starts with a potential real shortcut (CTRL+letter followed by space/text)
-            start_match = re.match(r'^(CTRL\+[a-zA-Z])(\s|$)', line, re.IGNORECASE)
-            preserved_start = ""
-            rest = line
-
-            if start_match:
-                # Preserve the initial shortcut
-                preserved_start = start_match.group(1)
-                rest = line[start_match.end()-1:]  # Keep the space/end
-
-            # Strip all CTRL+ from the rest
-            rest = re.sub(r'CTRL\+([^\s])', r'\1', rest, flags=re.IGNORECASE)
-
-            # Also handle standalone CTRL+ (no char after)
-            rest = re.sub(r'CTRL\+(?=\s|$)', '', rest, flags=re.IGNORECASE)
-
-            # Remove standalone CTRL word
-            rest = re.sub(r'\bCTRL\b(?!\+)', '', rest, flags=re.IGNORECASE)
-
-            return preserved_start + rest
-
-        # Process line by line
-        lines = text.split('\n')
-        filtered_lines = [filter_line(line) for line in lines]
-        text = '\n'.join(filtered_lines)
-
-        # Clean up any double/multiple spaces
-        text = re.sub(r'  +', ' ', text)
-
-        # Clean up space before newline
-        text = re.sub(r' +\n', '\n', text)
-
-        # Clean up lines that are now empty or just whitespace
-        text = re.sub(r'\n\s*\n', '\n', text)
-
-        return text.strip() if text.strip() else text
-
-    def _refilter_logs(self):
-        """Re-apply all filters including CTRL bug filter."""
-        self._apply_filter()
-
-    def _on_ctrl_filter_change(self):
-        """Handle CTRL bug filter toggle change - update both logs and DuckyScript."""
-        # Re-process all logs through the analyzer with current filter state
-        self._reprocess_analyzer()
-        self._apply_filter()
-        if self.redteam_mode.get():
-            self._refresh_ducky()
-
-    def _reprocess_analyzer(self):
-        """Re-process all stored logs through the analyzer with current filter settings."""
-        self.analyzer.reset()
-        for msg, color, ts in self.all_logs:
-            # Apply CTRL bug filter based on current toggle state
-            filtered_msg = self._filter_ctrl_bug_text(msg)
-            # Only process lines that look like keystroke data
-            if "HID" in msg.upper() or "GUI+" in msg or "ALT+" in msg or "CTRL+" in msg or filtered_msg.strip():
-                self.analyzer.add_line(filtered_msg)
-        self._update_payload_display()
 
     def _log(self, msg, color=None, add_ts=True, store=True):
         if store:
@@ -1145,9 +1079,6 @@ class CerberusApp(tk.Tk):
 
         if not self._matches_filter(msg):
             return
-
-        # Apply CTRL bug filter for display
-        display_msg = self._filter_ctrl_bug_text(msg)
 
         self.log_text.configure(state="normal")
         if add_ts and self.show_timestamps.get():
@@ -1166,7 +1097,7 @@ class CerberusApp(tk.Tk):
         if color in [COLORS["danger"], COLORS["warning"]]:
             self.alert_count += 1
 
-        self.log_text.insert("end", display_msg, tag or "fg_normal")
+        self.log_text.insert("end", msg, tag or "fg_normal")
         self.line_count += 1
         self._update_stats()
         self.log_text.see("end")
@@ -1174,7 +1105,7 @@ class CerberusApp(tk.Tk):
 
         # Also log to RT console if in redteam mode
         if self.redteam_mode.get():
-            self._log_rt(display_msg, color)
+            self._log_rt(msg, color)
 
     def _matches_filter(self, msg):
         fname = self.filter_var.get()
@@ -1233,8 +1164,13 @@ class CerberusApp(tk.Tk):
                 f.write("Patterns:\n")
                 for n, s in self.analyzer.detected_patterns:
                     f.write(f"  - {n} ({s})\n")
-                f.write("\n\n" + "="*50 + "\nDUCKYSCRIPT EXPORT\n" + "="*50 + "\n")
-                f.write(self.analyzer.export_duckyscript())
+                if self.device_info:
+                    f.write("\n\n" + "="*50 + "\nDEVICE DESCRIPTOR\n" + "="*50 + "\n")
+                    for k, v in self.device_info.items():
+                        f.write(f"  {k}: {v}\n")
+                    if self.raw_descriptor_lines:
+                        f.write("\nRaw:\n")
+                        f.write("\n".join(self.raw_descriptor_lines))
             self._log(f"Saved to {filename}\n", COLORS["success"])
 
     def _refresh_ports(self, auto_select=False):
@@ -1344,6 +1280,7 @@ class CerberusApp(tk.Tk):
 
     def _process_line(self, line):
         self._log(line + "\n")
+        self._update_device_info(line)
         self._check_patterns(line)
 
     def _on_close(self):

@@ -1080,6 +1080,52 @@ static void process_kbd_report(hid_keyboard_report_t const* report) {
   // Previous report to check key released
   static hid_keyboard_report_t prev_report = { 0, 0, { 0 } };
 
+  // -----------------------------------------------------------------------
+  // Spurious-CTRL detection
+  //
+  // Some devices (Flipper Zero BadKB, certain RP2040 firmwares) set the CTRL
+  // modifier bit on *every* HID report, including ordinary STRING characters.
+  // We count consecutive keypresses (reports that actually have keycodes) that
+  // carry CTRL in the modifier.  Once the run reaches CTRL_SPURIOUS_THRESHOLD
+  // we enter suppress-mode and omit the "CTRL+" prefix from serial output.
+  // Suppress-mode is cleared as soon as any keypress arrives WITHOUT CTRL.
+  //
+  // Reports with no active keycodes (key-release reports) are ignored so
+  // they don't artificially reset the counter between rapid keystrokes.
+  // -----------------------------------------------------------------------
+  #define CTRL_SPURIOUS_THRESHOLD 3
+  static uint8_t  ctrl_seq_count   = 0;
+  static bool     ctrl_is_spurious = false;
+
+  bool report_has_ctrl = (report->modifier &
+      (KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTCTRL)) != 0;
+
+  // Check if this report actually contains any pressed key
+  bool report_has_key = false;
+  for (uint8_t i = 0; i < 6; i++) {
+    if (report->keycode[i]) { report_has_key = true; break; }
+  }
+
+  if (report_has_key) {
+    if (report_has_ctrl) {
+      if (ctrl_seq_count < 255) ctrl_seq_count++;
+      if (!ctrl_is_spurious && ctrl_seq_count >= CTRL_SPURIOUS_THRESHOLD) {
+        ctrl_is_spurious = true;
+        SerialTinyUSB.print(" [CTRL-filtered]");
+      }
+    } else {
+      // A real keypress without CTRL — device is sending clean data again
+      if (ctrl_is_spurious) {
+        ctrl_is_spurious = false;
+        if (show_hid_debug) {
+          SerialTinyUSB.print(" [CTRL-filter-off]");
+        }
+      }
+      ctrl_seq_count = 0;
+    }
+  }
+  // (reports with no keycodes leave the counter unchanged)
+
   // Debug: show raw modifier byte if enabled
   if (show_hid_debug && report->modifier != 0) {
     SerialTinyUSB.printf("[mod=0x%02X]", report->modifier);
@@ -1122,25 +1168,39 @@ static void process_kbd_report(hid_keyboard_report_t const* report) {
         }
 
         bool const is_ctrl = (mod & (KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTCTRL)) != 0;
-        bool const is_gui = (mod & (KEYBOARD_MODIFIER_LEFTGUI | KEYBOARD_MODIFIER_RIGHTGUI)) != 0;
-        bool const is_alt = (mod & (KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_RIGHTALT)) != 0;
+        bool const is_gui  = (mod & (KEYBOARD_MODIFIER_LEFTGUI  | KEYBOARD_MODIFIER_RIGHTGUI))  != 0;
+        bool const is_alt  = (mod & (KEYBOARD_MODIFIER_LEFTALT  | KEYBOARD_MODIFIER_RIGHTALT))  != 0;
 
-        // Check if this is a special key (returns true if it printed something)
-        bool is_special = is_special_key(keycode);
+        // Resolve the key to a display marker WITHOUT printing yet.
+        // This fixes the output-order bug: previously is_special_key() printed the key
+        // as a side effect before the modifier prefix was emitted, resulting in output
+        // like "<ENTER>\nCTRL+" instead of "CTRL+<ENTER>\n".
+        const char* marker = get_special_key_marker(keycode);
+        bool const is_special  = (marker != NULL);
+        bool const is_printable = (!is_special) && (ch >= 0x20 && ch < 0x7F);
+        bool const is_ctrl_char = (!is_special) && (!is_printable) &&
+                                   (ch == '\r' || ch == '\t' || ch == '\b' || ch == 0x1B);
 
-        // Output with modifiers prefix only if a modifier is actually held
-        // AND we have something to output (not just a modifier key alone)
-        if ((is_ctrl || is_gui || is_alt) && (is_special || (ch >= 0x20 && ch < 0x7F))) {
-          if (is_ctrl) SerialTinyUSB.print("CTRL+");
-          if (is_gui) SerialTinyUSB.print("GUI+");
-          if (is_alt) SerialTinyUSB.print("ALT+");
+        bool const has_output = is_special || is_printable || is_ctrl_char;
+        if (!has_output) continue;
+
+        // 1. Print modifier prefix FIRST (always before the key).
+        //    Suppress CTRL+ when the spurious-CTRL detector is active.
+        bool const print_ctrl = is_ctrl && !ctrl_is_spurious;
+        if (print_ctrl || is_gui || is_alt) {
+          if (print_ctrl) SerialTinyUSB.print("CTRL+");
+          if (is_gui)     SerialTinyUSB.print("GUI+");
+          if (is_alt)     SerialTinyUSB.print("ALT+");
         }
 
-        // Output the key
+        // 2. Print the key / marker AFTER the modifiers
         if (is_special) {
-          // Already printed by is_special_key()
-        } else if (ch >= 0x20 && ch < 0x7F) {
-          // Printable ASCII character
+          SerialTinyUSB.print(marker);
+          // Newline after ENTER so the next keystroke starts on a fresh line
+          if (keycode == HID_KEY_ENTER || keycode == HID_KEY_KEYPAD_ENTER) {
+            SerialTinyUSB.print("\n");
+          }
+        } else if (is_printable) {
           SerialTinyUSB.printf("%c", ch);
         } else if (ch == '\r') {
           SerialTinyUSB.print("<ENTER>\n");
@@ -1151,7 +1211,6 @@ static void process_kbd_report(hid_keyboard_report_t const* report) {
         } else if (ch == 0x1B) {
           SerialTinyUSB.print("<ESC>");
         }
-        // For non-printable chars without special handling, is_special_key already handled it
 
         fflush(stdout);
       }
@@ -1161,97 +1220,86 @@ static void process_kbd_report(hid_keyboard_report_t const* report) {
   prev_report = *report;
 }
 
-// Returns true if this is a special key and prints its marker
-static bool is_special_key(uint8_t code) {
-  const char* marker = NULL;
-
+// Returns the display marker for a special key, or NULL if it is not a special key.
+// Does NOT print anything — the caller is responsible for printing modifiers first,
+// then this marker, so the output order is always correct.
+static const char* get_special_key_marker(uint8_t code) {
   switch (code) {
     // Arrow keys
-    case HID_KEY_ARROW_RIGHT: marker = "<ARROWRIGHT>"; break;
-    case HID_KEY_ARROW_LEFT:  marker = "<ARROWLEFT>"; break;
-    case HID_KEY_ARROW_DOWN:  marker = "<ARROWDOWN>"; break;
-    case HID_KEY_ARROW_UP:    marker = "<ARROWUP>"; break;
+    case HID_KEY_ARROW_RIGHT: return "<ARROWRIGHT>";
+    case HID_KEY_ARROW_LEFT:  return "<ARROWLEFT>";
+    case HID_KEY_ARROW_DOWN:  return "<ARROWDOWN>";
+    case HID_KEY_ARROW_UP:    return "<ARROWUP>";
 
     // Navigation
-    case HID_KEY_HOME:      marker = "<HOME>"; break;
-    case HID_KEY_END:       marker = "<END>"; break;
-    case HID_KEY_PAGE_UP:   marker = "<PAGEUP>"; break;
-    case HID_KEY_PAGE_DOWN: marker = "<PAGEDOWN>"; break;
-    case HID_KEY_INSERT:    marker = "<INSERT>"; break;
-    case HID_KEY_DELETE:    marker = "<DEL>"; break;
+    case HID_KEY_HOME:      return "<HOME>";
+    case HID_KEY_END:       return "<END>";
+    case HID_KEY_PAGE_UP:   return "<PAGEUP>";
+    case HID_KEY_PAGE_DOWN: return "<PAGEDOWN>";
+    case HID_KEY_INSERT:    return "<INSERT>";
+    case HID_KEY_DELETE:    return "<DEL>";
 
     // Function keys
-    case HID_KEY_F1:  marker = "<F1>"; break;
-    case HID_KEY_F2:  marker = "<F2>"; break;
-    case HID_KEY_F3:  marker = "<F3>"; break;
-    case HID_KEY_F4:  marker = "<F4>"; break;
-    case HID_KEY_F5:  marker = "<F5>"; break;
-    case HID_KEY_F6:  marker = "<F6>"; break;
-    case HID_KEY_F7:  marker = "<F7>"; break;
-    case HID_KEY_F8:  marker = "<F8>"; break;
-    case HID_KEY_F9:  marker = "<F9>"; break;
-    case HID_KEY_F10: marker = "<F10>"; break;
-    case HID_KEY_F11: marker = "<F11>"; break;
-    case HID_KEY_F12: marker = "<F12>"; break;
+    case HID_KEY_F1:  return "<F1>";
+    case HID_KEY_F2:  return "<F2>";
+    case HID_KEY_F3:  return "<F3>";
+    case HID_KEY_F4:  return "<F4>";
+    case HID_KEY_F5:  return "<F5>";
+    case HID_KEY_F6:  return "<F6>";
+    case HID_KEY_F7:  return "<F7>";
+    case HID_KEY_F8:  return "<F8>";
+    case HID_KEY_F9:  return "<F9>";
+    case HID_KEY_F10: return "<F10>";
+    case HID_KEY_F11: return "<F11>";
+    case HID_KEY_F12: return "<F12>";
 
-    // Keypad (numpad) - these output the digit character, not special markers
-    // Only mark as special if numlock is off (navigation mode), but we can't easily detect that
-    // So we'll output the digit directly for keypad keys
-    case HID_KEY_KEYPAD_1: SerialTinyUSB.print("1"); return true;
-    case HID_KEY_KEYPAD_2: SerialTinyUSB.print("2"); return true;
-    case HID_KEY_KEYPAD_3: SerialTinyUSB.print("3"); return true;
-    case HID_KEY_KEYPAD_4: SerialTinyUSB.print("4"); return true;
-    case HID_KEY_KEYPAD_5: SerialTinyUSB.print("5"); return true;
-    case HID_KEY_KEYPAD_6: SerialTinyUSB.print("6"); return true;
-    case HID_KEY_KEYPAD_7: SerialTinyUSB.print("7"); return true;
-    case HID_KEY_KEYPAD_8: SerialTinyUSB.print("8"); return true;
-    case HID_KEY_KEYPAD_9: SerialTinyUSB.print("9"); return true;
-    case HID_KEY_KEYPAD_0: SerialTinyUSB.print("0"); return true;
-    case HID_KEY_KEYPAD_DECIMAL:  SerialTinyUSB.print("."); return true;
-    case HID_KEY_KEYPAD_DIVIDE:   SerialTinyUSB.print("/"); return true;
-    case HID_KEY_KEYPAD_MULTIPLY: SerialTinyUSB.print("*"); return true;
-    case HID_KEY_KEYPAD_SUBTRACT: SerialTinyUSB.print("-"); return true;
-    case HID_KEY_KEYPAD_ADD:      SerialTinyUSB.print("+"); return true;
-    case HID_KEY_KEYPAD_ENTER:    marker = "<ENTER>"; break;
+    // Keypad — return the digit/operator string directly so the caller can print
+    // modifier prefix before it (e.g. CTRL+1 would have been broken before this fix)
+    case HID_KEY_KEYPAD_1:        return "1";
+    case HID_KEY_KEYPAD_2:        return "2";
+    case HID_KEY_KEYPAD_3:        return "3";
+    case HID_KEY_KEYPAD_4:        return "4";
+    case HID_KEY_KEYPAD_5:        return "5";
+    case HID_KEY_KEYPAD_6:        return "6";
+    case HID_KEY_KEYPAD_7:        return "7";
+    case HID_KEY_KEYPAD_8:        return "8";
+    case HID_KEY_KEYPAD_9:        return "9";
+    case HID_KEY_KEYPAD_0:        return "0";
+    case HID_KEY_KEYPAD_DECIMAL:  return ".";
+    case HID_KEY_KEYPAD_DIVIDE:   return "/";
+    case HID_KEY_KEYPAD_MULTIPLY: return "*";
+    case HID_KEY_KEYPAD_SUBTRACT: return "-";
+    case HID_KEY_KEYPAD_ADD:      return "+";
+    case HID_KEY_KEYPAD_ENTER:    return "<ENTER>";
 
     // System keys
-    case HID_KEY_PRINT_SCREEN: marker = "<PRNT>"; break;
-    case HID_KEY_SCROLL_LOCK:  marker = "<SCRLL>"; break;
-    case HID_KEY_PAUSE:        marker = "<PAUSE>"; break;
-    case HID_KEY_NUM_LOCK:     marker = "<NUMLOCK>"; break;
-    case HID_KEY_CAPS_LOCK:    marker = "<CAPSLOCK>"; break;
-    case HID_KEY_ESCAPE:       marker = "<ESC>"; break;
+    case HID_KEY_PRINT_SCREEN: return "<PRNT>";
+    case HID_KEY_SCROLL_LOCK:  return "<SCRLL>";
+    case HID_KEY_PAUSE:        return "<PAUSE>";
+    case HID_KEY_NUM_LOCK:     return "<NUMLOCK>";
+    case HID_KEY_CAPS_LOCK:    return "<CAPSLOCK>";
+    case HID_KEY_ESCAPE:       return "<ESC>";
 
-    // Modifier keys (when pressed alone)
+    // Modifier keys (when pressed alone, i.e. no other key in the report)
     case HID_KEY_CONTROL_LEFT:
-    case HID_KEY_CONTROL_RIGHT: marker = "<CTRL>"; break;
+    case HID_KEY_CONTROL_RIGHT: return "<CTRL>";
     case HID_KEY_ALT_LEFT:
-    case HID_KEY_ALT_RIGHT:     marker = "<ALT>"; break;
+    case HID_KEY_ALT_RIGHT:     return "<ALT>";
     case HID_KEY_GUI_LEFT:
-    case HID_KEY_GUI_RIGHT:     marker = "<WIN>"; break;
+    case HID_KEY_GUI_RIGHT:     return "<WIN>";
     case HID_KEY_SHIFT_LEFT:
-    case HID_KEY_SHIFT_RIGHT:   marker = "<SHIFT>"; break;
-    case HID_KEY_APPLICATION:   marker = "<MENU>"; break;
+    case HID_KEY_SHIFT_RIGHT:   return "<SHIFT>";
+    case HID_KEY_APPLICATION:   return "<MENU>";
 
     // Space, Enter, Tab, Backspace
-    case HID_KEY_SPACE:     SerialTinyUSB.print(" "); return true;
-    case HID_KEY_ENTER:     marker = "<ENTER>"; break;
-    case HID_KEY_TAB:       marker = "<TAB>"; break;
-    case HID_KEY_BACKSPACE: marker = "<BACKSPACE>"; break;
+    case HID_KEY_SPACE:     return " ";
+    case HID_KEY_ENTER:     return "<ENTER>";
+    case HID_KEY_TAB:       return "<TAB>";
+    case HID_KEY_BACKSPACE: return "<BACKSPACE>";
 
     default:
-      return false;  // Not a special key
+      return NULL;  // Not a special key
   }
-
-  if (marker) {
-    SerialTinyUSB.print(marker);
-    // Add newline after ENTER for readability
-    if (code == HID_KEY_ENTER || code == HID_KEY_KEYPAD_ENTER) {
-      SerialTinyUSB.print("\n");
-    }
-    return true;
-  }
-  return false;
 }
 
 static void process_mouse_report(hid_mouse_report_t const* report) {
