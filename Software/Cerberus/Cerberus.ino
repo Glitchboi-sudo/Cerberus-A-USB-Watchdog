@@ -49,7 +49,7 @@ extern "C" {
  * - CPU Speed must be either 120 or 240 Mhz. Selected via "Menu -> CPU Speed"
  */
 
-#define HOST_PIN_DP 10       // Pin used as D+ for host, D- = D+ + 1
+#define HOST_PIN_DP 0       // Pin used as D+ for host, D- = D+ + 1
 #define LANGUAGE_ID 0x0409  // English
 
 // USB Host object
@@ -99,10 +99,10 @@ void draw(const char* text, uint8_t logoIndex);
 Adafruit_USBD_MSC usb_msc;
 
 // Manual reset button wired GP3 to GND
-#define BTN_RST 1
+#define BTN_RST 3
 
 // Manual OK button wired GP6 to GND
-#define BTN_OK 0
+#define BTN_OK 6
 
 //
 // USBKiller Globals

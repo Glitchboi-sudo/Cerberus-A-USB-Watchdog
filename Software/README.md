@@ -1,30 +1,110 @@
 # Software
 
-Estructura lista para Arduino IDE
-- `Cerberus/` contiene el sketch con el mismo nombre (`Cerberus.ino`), asi el IDE no pedira crear una carpeta al abrirlo.
-- `Cerberus/ramdisk.h` es la imagen FAT que se presenta como RAM Disk.
+Firmware y herramientas de software para el proyecto Cerberus.
 
-Contenido del firmware
-- `Cerberus.ino`: firmware principal (RAM Disk MSC, detector HID host con PIO-USB, avisos OLED/serie, LED neopixel y detector USB Killer).
-- `ramdisk.h`: bloques predefinidos para el disco (README/AUTORUN en sectores fijos; hexdumps en serie).
-- `cerberus_listener.py`: script PC (GUI) para detectar el puerto serie de Cerberus, visualizar el log en vivo y guardar el contenido a un archivo de texto.
+---
 
-Pines/ajustes relevantes
-- OLED I2C: addr `0x3C` (SSD1306), tamano 128x64 por defecto.
-- NeoPixel de estado: GPIO29.
-- USB Killer: `KILLER_PIN` GPIO8.
-- Host USB (PIO-USB): `HOST_PIN_DP` GPIO0 (D- = GPIO1).
-- Descriptores USB personalizados (VID/PID/strings) para anti-deteccion.
+## Estructura de archivos
 
-Dependencias (Arduino IDE)
-- Adafruit TinyUSB, Pico-PIO-USB, Adafruit_GFX, Adafruit_SSD1306.
-- Board: Raspberry Pi RP2040, USB Stack: Adafruit TinyUSB.
+```
+Software/
+├── Cerberus/
+│   ├── Cerberus.ino    # Firmware principal
+│   ├── ramdisk.h       # Imagen FAT del RAM Disk virtual
+│   └── resources.h     # Iconos y recursos gráficos para OLED
+├── cerberus_listener.py # Aplicación companion (GUI)
+└── README.md
+```
 
-Script de escucha en PC (`cerberus_listener.py`)
-- Prerequisitos: Python 3 y `pyserial` (`pip install pyserial`). Usa `tkinter` (incluido en instalaciones estándar).
-- Funciona: intenta detectar el puerto por VID/PID o nombre, permite elegir manualmente si no lo halla, muestra las lineas recibidas en una ventana con scroll y permite guardarlas a texto.
-- Uso rapido: `python Software/cerberus_listener.py`; si no auto-detecta, selecciona el puerto en el combo y pulsa Conectar. Para guardar el log visible, pulsa “Guardar log…” y elige nombre/ruta.
+---
 
-Uso rapido
-- Abre `Software/Cerberus/Cerberus.ino` en Arduino IDE y sube a la Pico.
-- Conecta al PC y observa mensajes en la OLED y por `SerialTinyUSB`.
+## Firmware (Cerberus/)
+
+### Cerberus.ino
+
+Firmware principal que implementa:
+
+- **Emulación MSC**: Disco RAM virtual que detecta lecturas de README/AUTORUN y escrituras sospechosas
+- **Host USB (PIO-USB)**: Monitoreo de dispositivos HID, Mass Storage y CDC
+- **Detección de amenazas**: USB Killer, dispositivos sospechosos (base de datos VID/PID), tecleo automatizado (BadUSB)
+- **Interfaz OLED**: GUI con iconos, estados y vista de descriptores USB
+- **LED NeoPixel**: Indicador visual de estado por colores
+- **Comandos serial**: Interface de texto para debugging y forense
+
+### ramdisk.h
+
+Imagen FAT predefinida con sectores fijos para README.txt y AUTORUN.INF. Permite detectar cuando el host intenta leer estos archivos.
+
+### resources.h
+
+Recursos gráficos (bitmaps) para la pantalla OLED: iconos de estado, alertas y logos.
+
+---
+
+## Pinout GPIO (RP2040)
+
+| GPIO   | Función      | Notas                                                     |
+| ------ | ------------ | --------------------------------------------------------- |
+| GPIO0  | USB Host D+  | PIO-USB (HOST_PIN_DP)                                     |
+| GPIO1  | USB Host D-  | PIO-USB (D+ + 1)                                          |
+| GPIO3  | BTN_RST      | Botón para navegar descriptores USB (INPUT_PULLUP)        |
+| GPIO4  | I2C SDA      | Pantalla OLED SSD1306                                     |
+| GPIO5  | I2C SCL      | Pantalla OLED SSD1306                                     |
+| GPIO6  | BTN_OK       | Botón para salir de vista descriptores (INPUT_PULLUP)     |
+| GPIO8  | KILLER_PIN   | Detección USB Killer (INPUT_PULLUP, interrupción FALLING) |
+| GPIO16 | NEOPIXEL_PIN | LED RGB de estado (WS2812)                                |
+
+---
+
+## Dependencias (Arduino IDE)
+
+| Librería                 | Versión mínima |
+| ------------------------ | -------------- |
+| Adafruit TinyUSB Library | >= 3.6.0       |
+| Pico-PIO-USB             | >= 0.7.2       |
+| Adafruit_GFX             | -              |
+| Adafruit_SSD1306         | >= 2.5.14      |
+| XxHash_arduino           | -              |
+| Adafruit_NeoPixel        | -              |
+
+**Board**: Raspberry Pi RP2040 (4.5.4)
+**USB Stack**: Adafruit TinyUSB
+**CPU Speed**: 133 MHz (se ajusta a 240 MHz en Core 1 para PIO-USB)
+
+---
+
+## Companion App (cerberus_listener.py)
+
+Aplicación GUI en Python/Tkinter para monitoreo en tiempo real desde PC.
+
+### Características
+
+- **Conexión serial**: Auto-detección del dispositivo, reconexión automática
+- **Log con filtros**: Colores por severidad, búsqueda, filtrado por categoría
+- **Analizador de payloads**: Detecta patrones de ataque (GUI+R, powershell, etc.)
+- **Modo Red Team**: Exportación de keystrokes a DuckyScript
+
+### Requisitos
+
+```bash
+pip install pyserial
+```
+
+> `tkinter` viene incluido en instalaciones estándar de Python
+
+### Uso
+
+```bash
+python Software/cerberus_listener.py
+```
+
+Si no auto-detecta el puerto, selecciónalo manualmente en el combo y pulsa "Conectar".
+
+---
+
+## Uso rápido
+
+1. Abre `Software/Cerberus/Cerberus.ino` en Arduino IDE
+2. Configura: `Tools → USB Stack → Adafruit TinyUSB`
+3. Sube el firmware a la Pico
+4. Conecta al PC y observa mensajes en la OLED y por `SerialTinyUSB`

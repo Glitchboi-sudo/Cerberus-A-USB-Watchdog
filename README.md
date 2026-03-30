@@ -1,6 +1,6 @@
 # Cerberus
 
-![Alpha V3 del proyecto](1.jpeg)
+![Alpha V4 del proyecto](1.jpg)
 
 <p align="center">
   <strong>Desarrollado por Glitchboi</strong><br>
@@ -68,24 +68,76 @@ Con Arduino IDE
 
 ## Uso
 
-- Conecta la Pico al PC por USB (puerto nativo del RP2040). La OLED mostrara la version y el LED quedara encendido si todo esta OK.
-- Observa los eventos en pantalla y en el LED:
-  - Lecturas del sistema: "[!] README (R)" y "[+] AUTORUN (R)"
-  - Escrituras/Borrados: "[!] WRITING" / "[!] DELETING"
-  - Dispositivo HID detectado o enviando datos: "[!!] HID Device" y "[!!] HID Sending data"
-  - USB Killer detectado: "[!!] USB Killer"
-- Boton BOOTSEL:
-  - Pulsacion corta: "[+] RESETTING" (reinicia el dispositivo)
-  - \>2 s: muestra "[+] HID Evt# N" (conteo de eventos HID)
-- Debug por serie: abre `SerialTinyUSB` para ver logs y hexdumps de bloques leidos/escritos.
+### Inicio
+
+1. Conecta la Pico por USB (puerto nativo del RP2040)
+2. La OLED mostrará "Selftest: OK" y el NeoPixel quedará en azul si todo funciona correctamente
+3. Conecta dispositivos USB sospechosos al puerto host para analizarlos
+
+### Indicadores en pantalla y LED
+
+| Evento                        | Mensaje OLED       | Color LED |
+| ----------------------------- | ------------------ | --------- |
+| Listo/Normal                  | "Cerberus Ready"   | Azul      |
+| Lectura de README             | "README (R)"       | Azul      |
+| Lectura de AUTORUN            | "AUTORUN (R)"      | Azul      |
+| Escritura detectada           | "WRITING"          | Azul      |
+| Borrado detectado             | "DELETING"         | Azul      |
+| Dispositivo HID conectado     | "HID Device"       | Rojo      |
+| HID enviando datos            | "HID Sending data" | Rojo      |
+| Dispositivo sospechoso        | "SUSP: [nombre]"   | Naranja   |
+| Tecleo automatizado (BadUSB)  | "AUTO [X] k/s"     | Magenta   |
+| USB Killer detectado          | "USB Killer"       | Rojo      |
+| Dispositivo de almacenamiento | "Mass Device"      | Verde     |
+
+### Botones físicos
+
+- **BTN_RST**: Navega por las páginas de descriptores USB del dispositivo conectado
+- **BTN_OK**: Sale de la vista de descriptores / refresca la pantalla
+- **BOOTSEL**:
+  - Pulsación corta: Reinicia el dispositivo
+  - Pulsación >2s: Muestra el conteo de eventos HID
+
+### Comandos por puerto serie
+
+Conecta vía serial (SerialTinyUSB) y escribe estos comandos:
+
+| Comando    | Descripción                                   |
+| ---------- | --------------------------------------------- |
+| `HELP`     | Muestra lista de comandos                     |
+| `STATUS`   | Estado actual del dispositivo                 |
+| `LAST`     | Info forense del último dispositivo conectado |
+| `RESET`    | Reinicia contadores                           |
+| `REBOOT`   | Reinicia el dispositivo                       |
+| `VERBOSE`  | Activa/desactiva modo detallado               |
+| `HEXDUMP`  | Activa/desactiva volcado hexadecimal          |
+| `HIDDEBUG` | Activa/desactiva debug HID (bytes crudos)     |
+| `CLEAR`    | Borra info del último dispositivo             |
 
 ---
 
 ## Hardware
 
-- El archivo `Hardware/PCB_PCB_usb_protect_breakout_2025-11-05.json` es un diseño de una breakout board con circuito de proteccion de sobrevoltaje (VBUS) para USB.
-- No es necesario para la version final del dispositivo. Si quieres armar tu propio prototipo en breadboard o similar, puedes usar este componente.
-- Disclaimer: la version actual esta mal hecha; funciona pero las conexiones estan invertidas. Se arreglara mas adelante.
+La carpeta `Hardware/` contiene los diseños de PCB del proyecto.
+
+### Esquemático
+
+![Esquemático de Cerberus](CerberusSchemmatics.png)
+
+### CerberusZero_V1.epro
+
+PCB completa del proyecto Cerberus. Incluye el circuito integrado con el RP2040, conectores USB, pantalla OLED y todos los componentes necesarios.
+
+- **Formato**: Proyecto de EasyEDA Pro
+- **Cómo abrir**: Importar en EasyEDA Pro desde `Archivo → Abrir`
+
+### ADUM3160 USB Isolator
+
+Módulo de aislamiento galvánico USB basado en el chip ADUM3160. Proporciona **protección contra ataques USB-Killer** al aislar eléctricamente el host del dispositivo, bloqueando picos de alto voltaje.
+
+- **Uso**: Complemento opcional para añadir una capa extra de seguridad física
+- **Velocidad**: USB 2.0 Full Speed (12 Mbps)
+- **Más información**: Ver `Hardware/ADUM3160 USB Isolator/README.md`
 
 ---
 
@@ -117,16 +169,6 @@ Aplicacion GUI en Python/Tkinter para monitoreo en tiempo real:
 
 ---
 
-## TODO
-
-- [ ] Documentar el cableado exacto.
-- [ ] Agregar fotos/diagramas de conexion y lista de materiales.
-- [ ] Publicar binarios `.uf2` en Releases para OLED 128x64 y 128x32.
-- [ ] Mejorar soporte/auto‑deteccion de pantallas OLED 128x32/64.
-- [ ] Guia del circuito para deteccion USB Killer en `KILLER_PIN`.
-
----
-
 ## Contribuir
 
 Este proyecto no solo es un repositorio: es un espacio abierto para aprender, experimentar y construir juntos. **Buscamos activamente contribuciones**, ya sea en la parte técnica o incluso en la documentación.
@@ -140,5 +182,6 @@ Este proyecto no solo es un repositorio: es un espacio abierto para aprender, ex
 ## Créditos
 
 - Proyecto basado en [USBvalve](https://github.com/cecio/USBvalve) hecho por _[Cecio](https://github.com/cecio)_
+- Proteccion Galvanica basada en [USB Isolator ](https://github.com/wagiminator/ADuM3160-USB-Isolator) hecho por _[wagiminator](https://github.com/wagiminator)_
 - Modificado / Creado por:
   - [Erik Alcantara](https://www.linkedin.com/in/erik-alc%C3%A1ntara-covarrubias-29a97628a/)
