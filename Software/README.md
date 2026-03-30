@@ -100,6 +100,8 @@ python Software/cerberus_listener.py
 
 Si no auto-detecta el puerto, selecciónalo manualmente en el combo y pulsa "Conectar".
 
+![Preview de la app](companionapp.png)
+
 ---
 
 ## Uso rápido
