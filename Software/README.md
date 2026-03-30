@@ -75,6 +75,7 @@ Recursos gráficos (bitmaps) para la pantalla OLED: iconos de estado, alertas y 
 
 ## Companion App (cerberus_listener.py)
 
+![Preview de la app](companionapp.png)
 Aplicación GUI en Python/Tkinter para monitoreo en tiempo real desde PC.
 
 ### Características
@@ -99,8 +100,6 @@ python Software/cerberus_listener.py
 ```
 
 Si no auto-detecta el puerto, selecciónalo manualmente en el combo y pulsa "Conectar".
-
-![Preview de la app](companionapp.png)
 
 ---
 
